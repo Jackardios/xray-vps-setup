@@ -22,14 +22,9 @@
   apt:
     name: unzip
     state: present
-- name: Get latest Xray-core version
-  uri:
-    url: https://api.github.com/repos/XTLS/Xray-core/releases/latest
-    return_content: yes
-  register: xray_latest
-- name: Download latest Xray-core
+- name: Download Xray-core v26
   get_url:
-    url: "https://github.com/XTLS/Xray-core/releases/download/{{ xray_latest.json.tag_name }}/Xray-linux-{{ 'arm64-v8a' if ansible_architecture == 'aarch64' else '64' }}.zip"
+    url: "https://github.com/XTLS/Xray-core/releases/download/{{ xray_version }}/Xray-linux-{{ 'arm64-v8a' if ansible_architecture == 'aarch64' else '64' }}.zip"
     dest: /tmp/xray-core.zip
 - name: Extract Xray-core
   unarchive:

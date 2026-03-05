@@ -41,6 +41,16 @@
       shell:
         cmd: docker run --rm ghcr.io/xtls/xray-core uuid
       register: xray_uuid
+- name: Get latest Xray-core v26 version
+  shell: curl -s "https://api.github.com/repos/XTLS/Xray-core/git/matching-refs/tags/v26." | grep -oP '"ref":\s*"refs/tags/\Kv26\.[^"]*' | sort -V | tail -1
+  register: xray_ver_result
+- name: Set Xray-core v26 version
+  set_fact:
+    xray_version: "{{ xray_ver_result.stdout }}"
+- name: Fail if no Xray-core v26 version found
+  fail:
+    msg: "Could not find any Xray-core v26.x.x release"
+  when: xray_version == ""
 - name: Install marzban
   include_tasks: install_marzban.yml
   when: setup_variant == "marzban"

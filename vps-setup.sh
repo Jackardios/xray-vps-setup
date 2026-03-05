@@ -134,6 +134,12 @@ export XRAY_CFG="/usr/local/etc/xray/config.json"
 
 # Install marzban
 xray_setup() {
+  XRAY_VER=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/git/matching-refs/tags/v26." | grep -oP '"ref": "refs/tags/\Kv26\.[^"]*' | sort -V | tail -1)
+  if [ -z "$XRAY_VER" ]; then
+    echo "Error: Could not find any Xray-core v26.x.x release"
+    exit 1
+  fi
+  XRAY_VER_NUM=${XRAY_VER#v}
   mkdir -p /opt/xray-vps-setup
   cd /opt/xray-vps-setup
   if [[ "${marzban_input,,}" == "y" ]]; then
@@ -153,7 +159,6 @@ xray_setup() {
      .services.caddy.volumes[2] = "./marzban_lib:/run/marzban"' -i /opt/xray-vps-setup/docker-compose.yml
     mkdir -p marzban caddy marzban_lib/xray-core
     apt-get install -y unzip
-    XRAY_VER=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -oP '"tag_name": "\K[^"]+')
     XRAY_ARCH=$([ "$(uname -m)" = "aarch64" ] && echo "arm64-v8a" || echo "64")
     wget -qO /tmp/xray-core.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-${XRAY_ARCH}.zip"
     unzip -o /tmp/xray-core.zip -d ./marzban_lib/xray-core
@@ -167,7 +172,7 @@ xray_setup() {
     wget -qO- https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/compose | envsubst > ./docker-compose.yml
     mkdir -p /opt/xray-vps-setup/caddy/templates
     yq eval \
-    '.services.xray.image = "ghcr.io/xtls/xray-core:25.6.8" | 
+    '.services.xray.image = "ghcr.io/xtls/xray-core:'"$XRAY_VER_NUM"'" |
     .services.xray.container_name = "xray" |
     .services.xray.user = "root" |
     .services.xray.command = "run -c /etc/xray/config.json" |
