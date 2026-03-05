@@ -8,7 +8,7 @@ export GIT_REPO="Akiyamov/xray-vps-setup"
 # Check if script started as root
 if [ "$EUID" -ne 0 ]
   then echo "Please run as root"
-  exit
+  exit 1
 fi
 
 # Install idn 
@@ -88,7 +88,7 @@ if [[ ${configure_warp_input,,} == "y" ]]; then
 fi
 
 # Check congestion protocol
-if sysctl net.ipv4.tcp_congestion_control | grep bbr; then
+if sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
     echo "BBR is already used"
 else
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
@@ -184,16 +184,16 @@ sshd_edit() {
 }
 
 add_user() {
-  useradd $SSH_USER -s /bin/bash
-  usermod -aG sudo $SSH_USER
-  echo $SSH_USER:$SSH_USER_PASS | chpasswd
-  mkdir -p /home/$SSH_USER/.ssh
-  touch /home/$SSH_USER/.ssh/authorized_keys
-  echo $input_ssh_pbk >> /home/$SSH_USER/.ssh/authorized_keys
-  chmod 700 /home/$SSH_USER/.ssh/
-  chmod 600 /home/$SSH_USER/.ssh/authorized_keys
-  chown $SSH_USER:$SSH_USER -R /home/$SSH_USER
-  usermod -aG docker $SSH_USER
+  useradd "$SSH_USER" -s /bin/bash
+  usermod -aG sudo "$SSH_USER"
+  echo "$SSH_USER:$SSH_USER_PASS" | chpasswd
+  mkdir -p "/home/$SSH_USER/.ssh"
+  touch "/home/$SSH_USER/.ssh/authorized_keys"
+  echo "$input_ssh_pbk" >> "/home/$SSH_USER/.ssh/authorized_keys"
+  chmod 700 "/home/$SSH_USER/.ssh/"
+  chmod 600 "/home/$SSH_USER/.ssh/authorized_keys"
+  chown "$SSH_USER:$SSH_USER" -R "/home/$SSH_USER"
+  usermod -aG docker "$SSH_USER"
 }
 
 debconf-set-selections <<EOF
@@ -244,28 +244,25 @@ warp_install() {
   apt update 
   apt install cloudflare-warp -y
   
-  echo "y" | warp-cli registration new
-  export TRY_WARP=$(echo $?)
-  if [[ $TRY_WARP != 0 ]]; then
+  if ! echo "y" | warp-cli registration new; then
     echo "Couldn't connect to WARP"
-    exit 0
-  else
-    warp-cli mode proxy
-    warp-cli proxy port 40000
-    warp-cli connect
-    if [[ "${marzban_input,,}" == "y" ]]; then
-      export XRAY_CONFIG_WARP="/opt/xray-vps-setup/marzban/xray_config.json"
-    else
-      export XRAY_CONFIG_WARP="/opt/xray-vps-setup/xray/config.json"
-    fi
-    yq eval \
-    '.outbounds += {"tag": "warp","protocol": "socks","settings": {"servers": [{"address": "127.0.0.1","port": 40000}]}}' \
-    -i $XRAY_CONFIG_WARP
-    yq eval \
-    '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}' \
-    -i $XRAY_CONFIG_WARP
-    docker compose -f /opt/xray-vps-setup/docker-compose.yml down && docker compose -f /opt/xray-vps-setup/docker-compose.yml up -d
+    return 0
   fi
+  warp-cli mode proxy
+  warp-cli proxy port 40000
+  warp-cli connect
+  if [[ "${marzban_input,,}" == "y" ]]; then
+    export XRAY_CONFIG_WARP="/opt/xray-vps-setup/marzban/xray_config.json"
+  else
+    export XRAY_CONFIG_WARP="/opt/xray-vps-setup/xray/config.json"
+  fi
+  yq eval \
+  '.outbounds += {"tag": "warp","protocol": "socks","settings": {"servers": [{"address": "127.0.0.1","port": 40000}]}}' \
+  -i $XRAY_CONFIG_WARP
+  yq eval \
+  '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}' \
+  -i $XRAY_CONFIG_WARP
+  docker compose -f /opt/xray-vps-setup/docker-compose.yml down && docker compose -f /opt/xray-vps-setup/docker-compose.yml up -d
 }
 
 end_script() {
