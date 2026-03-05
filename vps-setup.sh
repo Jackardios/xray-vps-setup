@@ -71,13 +71,12 @@ if [[ ${configure_ssh_input,,} == "y" ]]; then
   # Read SSH Pubkey
   read -ep "Enter SSH public key:"$'\n' input_ssh_pbk
   echo "$input_ssh_pbk" > ./test_pbk
-  ssh-keygen -l -f ./test_pbk
-  PBK_STATUS=$(echo $?)
-  if [ "$PBK_STATUS" -eq 255 ]; then
+  if ! ssh-keygen -l -f ./test_pbk > /dev/null 2>&1; then
     echo "Can't verify the public key. Try again and make sure to include 'ssh-rsa' or 'ssh-ed25519' followed by 'user@pcname' at the end of the file."
-    exit
+    rm -f ./test_pbk
+    exit 1
   fi
-  rm ./test_pbk
+  rm -f ./test_pbk
 fi
 
 read -ep "Do you want to install WARP and use it on russian websites? [y/N] "$'\n' configure_warp_input
