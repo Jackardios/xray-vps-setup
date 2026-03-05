@@ -115,7 +115,7 @@ if ! command -v docker 2>&1 >/dev/null; then
 fi
 
 # Generate values for XRay
-export SSH_USER=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 8; echo)
+export SSH_USER=$(printf '%s%s' "$(tr -dc A-Za-z </dev/urandom | head -c 1)" "$(tr -dc A-Za-z0-9 </dev/urandom | head -c 7)")
 export SSH_USER_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13; echo)
 export SSH_PORT=${input_ssh_port:-22}
 export ROOT_LOGIN="yes"
