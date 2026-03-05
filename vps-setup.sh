@@ -283,14 +283,80 @@ warp_install() {
   docker compose -f /opt/xray-vps-setup/docker-compose.yml down && docker compose -f /opt/xray-vps-setup/docker-compose.yml up -d
 }
 
+configure_marzban_hosts() {
+  local MARZBAN_BASE="http://localhost"
+  local SOCKET="/opt/xray-vps-setup/marzban_lib/marzban.socket"
+  local max_attempts=30
+
+  echo "Waiting for Marzban to start..."
+  for i in $(seq 1 $max_attempts); do
+    if curl -sf --unix-socket "$SOCKET" "$MARZBAN_BASE/api/admin/token" -X POST \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "username=xray_admin&password=$MARZBAN_PASS" -o /dev/null 2>/dev/null; then
+      break
+    fi
+    sleep 2
+  done
+
+  local TOKEN
+  TOKEN=$(curl -sf --unix-socket "$SOCKET" "$MARZBAN_BASE/api/admin/token" -X POST \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "username=xray_admin&password=$MARZBAN_PASS" | grep -oP '"access_token"\s*:\s*"\K[^"]+')
+
+  if [ -z "$TOKEN" ]; then
+    echo "Warning: Could not authenticate with Marzban API. Configure XHTTP host settings manually:"
+    echo "  1. Go to Host Settings for inbound 'VLESS-XHTTP'"
+    echo "  2. Set Port: $XHTTP_PORT, Security: tls, SNI: $VLESS_DOMAIN"
+    return 0
+  fi
+
+  local CURRENT_HOSTS
+  CURRENT_HOSTS=$(curl -sf --unix-socket "$SOCKET" "$MARZBAN_BASE/api/hosts" \
+    -H "Authorization: Bearer $TOKEN")
+
+  if [ -z "$CURRENT_HOSTS" ]; then
+    echo "Warning: Could not get current hosts from Marzban API. Configure XHTTP host settings manually."
+    return 0
+  fi
+
+  local UPDATED_HOSTS
+  UPDATED_HOSTS=$(echo "$CURRENT_HOSTS" | python3 -c "
+import sys, json
+hosts = json.load(sys.stdin)
+tag = 'VLESS-XHTTP'
+if tag in hosts:
+    for h in hosts[tag]:
+        h['port'] = $XHTTP_PORT
+        h['security'] = 'tls'
+        h['sni'] = '$VLESS_DOMAIN'
+        h['fingerprint'] = 'random'
+json.dump(hosts, sys.stdout)
+")
+
+  local RESULT
+  RESULT=$(curl -sf --unix-socket "$SOCKET" "$MARZBAN_BASE/api/hosts" -X PUT \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$UPDATED_HOSTS")
+
+  if [ -n "$RESULT" ]; then
+    echo "XHTTP host settings configured automatically in Marzban."
+  else
+    echo "Warning: Could not update hosts via API. Configure XHTTP host settings manually:"
+    echo "  1. Go to Host Settings for inbound 'VLESS-XHTTP'"
+    echo "  2. Set Port: $XHTTP_PORT, Security: tls, SNI: $VLESS_DOMAIN"
+  fi
+}
+
 end_script() {
   if [[ ${configure_warp_input,,} == "y" ]]; then
     warp_install
   fi
-  
+
   if [[ "${marzban_input,,}" == "y" ]]; then
     docker run -v /opt/xray-vps-setup/caddy/Caddyfile:/opt/xray-vps-setup/Caddyfile --rm caddy caddy fmt --overwrite /opt/xray-vps-setup/Caddyfile
     docker compose -f /opt/xray-vps-setup/docker-compose.yml up -d
+    configure_marzban_hosts
 
     final_msg="Marzban panel location: https://$VLESS_DOMAIN/$MARZBAN_PATH
 User: xray_admin
@@ -305,8 +371,10 @@ Password: $MARZBAN_PASS
 
     xray_config=$(wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/xray_outbound" | envsubst)
     singbox_config=$(wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/sing_box_outbound" | envsubst)
+    xray_xhttp_config=$(wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/xray_xhttp_outbound" | envsubst)
 
-    final_msg="Clipboard string format:
+    final_msg="=== TCP-Reality (port 443) ===
+Clipboard string:
 vless://$XRAY_UUID@$VLESS_DOMAIN:443?type=tcp&security=reality&pbk=$XRAY_PBK&fp=random&sni=$VLESS_DOMAIN&sid=$XRAY_SID&spx=%2F&flow=xtls-rprx-vision
 
 XRay outbound config:
@@ -314,6 +382,13 @@ $xray_config
 
 Sing-box outbound config:
 $singbox_config
+
+=== XHTTP-TLS (port $XHTTP_PORT) ===
+Clipboard string:
+vless://$XRAY_UUID@$VLESS_DOMAIN:$XHTTP_PORT?type=xhttp&security=tls&sni=$VLESS_DOMAIN&path=%2Fapi%2Fv1%2Fupdate&mode=auto&fp=random
+
+XRay outbound config:
+$xray_xhttp_config
 
 Plain data:
 PBK: $XRAY_PBK, SID: $XRAY_SID, UUID: $XRAY_UUID

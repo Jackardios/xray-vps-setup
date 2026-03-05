@@ -60,9 +60,9 @@
       }
     },
     {
-      "tag": "VLESS-XHTTP-REALITY",
-      "listen": "0.0.0.0",
-      "port": $XHTTP_PORT,
+      "tag": "VLESS-XHTTP",
+      "listen": "127.0.0.1",
+      "port": 8087,
       "protocol": "vless",
       "settings": {
         "clients": [
@@ -75,27 +75,10 @@
       },
       "streamSettings": {
         "network": "xhttp",
-        "security": "reality",
+        "security": "none",
         "xhttpSettings": {
           "path": "/api/v1/update",
           "mode": "auto"
-        },
-        "realitySettings": {
-          "target": "127.0.0.1:4123",
-          "serverNames": [
-            "$VLESS_DOMAIN"
-          ],
-          "privateKey": "$XRAY_PIK",
-          "publicKey": "$XRAY_PBK",
-          "minClientVer": "1.8.0",
-          "maxTimeDiff": 60000,
-          "shortIds": [
-            "$XRAY_SID1",
-            "$XRAY_SID2",
-            "$XRAY_SID3",
-            "$XRAY_SID4",
-            "$XRAY_SID5"
-          ]
         }
       },
       "sniffing": {

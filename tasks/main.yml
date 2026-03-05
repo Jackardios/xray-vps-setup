@@ -65,6 +65,9 @@
     project_src: /opt/xray-vps-setup
     files:
     - docker-compose.yml
+- name: Configure Marzban XHTTP host settings
+  include_tasks: configure_marzban_hosts.yml
+  when: setup_variant == "marzban"
 - name: End xray
   include_tasks: end_xray.yml
   when: setup_variant == "xray"

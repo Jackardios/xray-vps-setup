@@ -1,0 +1,89 @@
+- name: Wait for Marzban to become ready
+  uri:
+    url: "http://localhost/api/admin/token"
+    unix_socket: /opt/xray-vps-setup/marzban_lib/marzban.socket
+    method: POST
+    body_format: form-urlencoded
+    body:
+      username: xray_admin
+      password: "{{ MARZBAN_PASS }}"
+    status_code: 200
+  register: marzban_health
+  retries: 30
+  delay: 2
+  until: marzban_health.status == 200
+  ignore_errors: true
+
+- name: Get Marzban access token
+  uri:
+    url: "http://localhost/api/admin/token"
+    unix_socket: /opt/xray-vps-setup/marzban_lib/marzban.socket
+    method: POST
+    body_format: form-urlencoded
+    body:
+      username: xray_admin
+      password: "{{ MARZBAN_PASS }}"
+    return_content: true
+  register: marzban_token_response
+  when: marzban_health is succeeded
+
+- name: Set access token
+  set_fact:
+    marzban_token: "{{ marzban_token_response.json.access_token }}"
+  when: marzban_token_response is succeeded
+
+- name: Get current hosts
+  uri:
+    url: "http://localhost/api/hosts"
+    unix_socket: /opt/xray-vps-setup/marzban_lib/marzban.socket
+    method: GET
+    headers:
+      Authorization: "Bearer {{ marzban_token }}"
+    return_content: true
+  register: marzban_hosts_response
+  when: marzban_token is defined
+
+- name: Update XHTTP host settings
+  set_fact:
+    updated_hosts: >-
+      {{
+        marzban_hosts_response.json | combine({
+          'VLESS-XHTTP': marzban_hosts_response.json['VLESS-XHTTP'] | map('combine', {
+            'port': xhttp_port | default(2087) | int,
+            'security': 'tls',
+            'sni': domain,
+            'fingerprint': 'random'
+          }) | list
+        })
+      }}
+  when: marzban_hosts_response is succeeded and 'VLESS-XHTTP' in marzban_hosts_response.json
+
+- name: Apply updated hosts to Marzban
+  uri:
+    url: "http://localhost/api/hosts"
+    unix_socket: /opt/xray-vps-setup/marzban_lib/marzban.socket
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ marzban_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body: "{{ updated_hosts }}"
+    return_content: true
+  register: marzban_hosts_update
+  when: updated_hosts is defined
+
+- name: Report XHTTP host configuration result
+  debug:
+    msg: "XHTTP host settings configured automatically in Marzban (port: {{ xhttp_port | default(2087) }}, security: tls, sni: {{ domain }})"
+  when: marzban_hosts_update is defined and marzban_hosts_update is succeeded
+
+- name: Warn if automatic configuration failed
+  debug:
+    msg: >-
+      WARNING: Could not configure XHTTP host settings automatically.
+      Please configure manually in Marzban panel:
+      1) Go to Host Settings for inbound 'VLESS-XHTTP'
+      2) Set Port: {{ xhttp_port | default(2087) }}
+      3) Set Security: tls
+      4) Set SNI: {{ domain }}
+  when: marzban_hosts_update is not defined or marzban_hosts_update is failed

@@ -1,0 +1,30 @@
+{
+  "tag": "xhttp",
+  "protocol": "vless",
+  "settings": {
+    "vnext": [
+      {
+        "address": "$VLESS_DOMAIN",
+        "port": $XHTTP_PORT,
+        "users": [
+          {
+            "id": "$XRAY_UUID",
+            "encryption": "none"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "xhttp",
+    "security": "tls",
+    "tlsSettings": {
+      "serverName": "$VLESS_DOMAIN",
+      "fingerprint": "random"
+    },
+    "xhttpSettings": {
+      "path": "/api/v1/update",
+      "mode": "auto"
+    }
+  }
+}

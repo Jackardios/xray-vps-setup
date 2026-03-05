@@ -63,9 +63,9 @@
       }
     },
     {
-      "tag": "VLESS-XHTTP-REALITY",
-      "listen": "0.0.0.0",
-      "port": {{ xhttp_port | default(2087) }},
+      "tag": "VLESS-XHTTP",
+      "listen": "127.0.0.1",
+      "port": 8087,
       "protocol": "vless",
       "settings": {
 {% if setup_variant == "marzban" %}
@@ -82,26 +82,10 @@
       },
       "streamSettings": {
         "network": "xhttp",
-        "security": "reality",
+        "security": "none",
         "xhttpSettings": {
           "path": "/api/v1/update",
           "mode": "auto"
-        },
-        "realitySettings": {
-          "target": "127.0.0.1:4123",
-          "serverNames": [
-            "{{ domain }}"
-          ],
-          "privateKey": "{{ x25519_pik.stdout }}",
-          "publicKey": "{{ x25519_pbk.stdout }}",
-          "minClientVer": "1.8.0",
-          "maxTimeDiff": 60000,
-          "shortIds": [
-{% for sid in short_ids %}
-            "{{ sid }}"{% if not loop.last %},{% endif %}
-
-{% endfor %}
-          ]
         }
       },
       "sniffing": {

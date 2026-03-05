@@ -58,6 +58,42 @@
                   }
               }
           }
+- name: Print XHTTP clipboard string
+  debug:
+    msg: "vless://{{ xray_uuid.stdout }}@{{ vless.domain }}:{{ xhttp_port | default(2087) }}?type=xhttp&security=tls&sni={{ vless.domain }}&path=%2Fapi%2Fv1%2Fupdate&mode=auto&fp=random"
+- name: XRay XHTTP outbound config
+  debug:
+    msg: |
+          {
+            "tag": "xhttp",
+            "protocol": "vless",
+            "settings": {
+              "vnext": [
+                {
+                  "address": "{{ vless.domain }}",
+                  "port": {{ xhttp_port | default(2087) }},
+                  "users": [
+                    {
+                      "id": "{{ xray_uuid.stdout }}",
+                      "encryption": "none"
+                    }
+                  ]
+                }
+              ]
+            },
+            "streamSettings": {
+              "network": "xhttp",
+              "security": "tls",
+              "tlsSettings": {
+                "serverName": "{{ vless.domain }}",
+                "fingerprint": "random"
+              },
+              "xhttpSettings": {
+                "path": "/api/v1/update",
+                "mode": "auto"
+              }
+            }
+          }
 - name: Print PBK, SID and UUID to connect to server.
   debug:
     msg: "UUID: {{ xray_uuid.stdout }}, SID: {{ short_ids[0] }}, PBK: {{ x25519_pbk.stdout }}"
