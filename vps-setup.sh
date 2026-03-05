@@ -63,9 +63,9 @@ read -ep "Do you want to install marzban? [y/N] "$'\n' marzban_input
 read -ep "Do you want to configure server security? Do this on first run only. [y/N] "$'\n' configure_ssh_input
 if [[ ${configure_ssh_input,,} == "y" ]]; then
   # Read SSH port
-  read -ep "Enter SSH port. Default 22, can't use ports: 80, 443 and 4123:"$'\n' input_ssh_port
+  read -ep "Enter SSH port. Default 22, can't use ports: 80, 443, 2087 and 4123:"$'\n' input_ssh_port
 
-  while [[ "$input_ssh_port" -eq "80" || "$input_ssh_port" -eq "443" || "$input_ssh_port" -eq "4123" ]]; do
+  while [[ "$input_ssh_port" -eq "80" || "$input_ssh_port" -eq "443" || "$input_ssh_port" -eq "2087" || "$input_ssh_port" -eq "4123" ]]; do
     read -ep "No, ssh can't use $input_ssh_port as port, write again:"$'\n' input_ssh_port
   done
   # Read SSH Pubkey
@@ -122,7 +122,13 @@ export IP_CADDY=$(hostname -I | cut -d' ' -f1)
 export CADDY_BASIC_AUTH=$(docker run --rm caddy caddy hash-password --plaintext $SSH_USER_PASS)
 export XRAY_PIK=$(docker run --rm ghcr.io/xtls/xray-core x25519 | head -n1 | cut -d' ' -f 2)
 export XRAY_PBK=$(docker run --rm ghcr.io/xtls/xray-core x25519 -i $XRAY_PIK | tail -2 | head -1 | cut -d' ' -f 2)
-export XRAY_SID=$(openssl rand -hex 8)
+export XRAY_SID1=$(openssl rand -hex 8)
+export XRAY_SID2=$(openssl rand -hex 8)
+export XRAY_SID3=$(openssl rand -hex 4)
+export XRAY_SID4=$(openssl rand -hex 2)
+export XRAY_SID5=$(openssl rand -hex 1)
+export XRAY_SID=$XRAY_SID1
+export XHTTP_PORT=2087
 export XRAY_UUID=$(docker run --rm ghcr.io/xtls/xray-core uuid)
 export XRAY_CFG="/usr/local/etc/xray/config.json"
 
@@ -145,7 +151,12 @@ xray_setup() {
      .services.marzban.volumes[1] = "./marzban/xray_config.json:/code/xray_config.json" |
      .services.marzban.volumes[2] = "./marzban/templates:/var/lib/marzban/templates" |
      .services.caddy.volumes[2] = "./marzban_lib:/run/marzban"' -i /opt/xray-vps-setup/docker-compose.yml
-    mkdir -p marzban caddy
+    mkdir -p marzban caddy marzban_lib/xray-core
+    apt-get install -y unzip
+    XRAY_VER=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+    XRAY_ARCH=$([ "$(uname -m)" = "aarch64" ] && echo "arm64-v8a" || echo "64")
+    wget -qO /tmp/xray-core.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-${XRAY_ARCH}.zip"
+    unzip -o /tmp/xray-core.zip -d ./marzban_lib/xray-core
     wget -qO- https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/marzban | envsubst > ./marzban/.env
     mkdir -p /opt/xray-vps-setup/marzban/templates/home
     wget -qO- https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/confluence_page | envsubst > ./marzban/templates/home/index.html
@@ -212,6 +223,7 @@ edit_iptables() {
   iptables -A INPUT -p tcp -m state --state NEW -m tcp --dport $SSH_PORT -j ACCEPT
   iptables -A INPUT -p tcp -m tcp --dport 80 -j ACCEPT
   iptables -A INPUT -p tcp -m tcp --dport 443 -j ACCEPT
+  iptables -A INPUT -p tcp -m tcp --dport $XHTTP_PORT -j ACCEPT
   iptables -A INPUT -i lo -j ACCEPT
   iptables -A OUTPUT -o lo -j ACCEPT
   iptables -P INPUT DROP
@@ -223,6 +235,7 @@ edit_iptables() {
   ip6tables -A INPUT -p tcp -m state --state NEW -m tcp --dport $SSH_PORT -j ACCEPT
   ip6tables -A INPUT -p tcp -m tcp --dport 80 -j ACCEPT
   ip6tables -A INPUT -p tcp -m tcp --dport 443 -j ACCEPT
+  ip6tables -A INPUT -p tcp -m tcp --dport $XHTTP_PORT -j ACCEPT
   ip6tables -A INPUT -i lo -j ACCEPT
   ip6tables -A OUTPUT -o lo -j ACCEPT
   ip6tables -P INPUT DROP

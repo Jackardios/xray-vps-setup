@@ -6,8 +6,6 @@
 - name: Install docker
   include_tasks: install_docker.yml
   when: ansible_facts.services['docker'] is undefined
-- name: Install/update yq
-  include_tasks: install_yq.yml
 - name: Security block
   block:
     - name: Edit SSHD config
@@ -27,10 +25,18 @@
       shell:
         cmd: docker run --rm ghcr.io/xtls/xray-core x25519 -i {{ x25519_pik.stdout }} | tail -1 | cut -d' ' -f 3
       register: x25519_pbk
-    - name: Generate SID
+    - name: Generate Short IDs
       shell:
-        cmd: openssl rand -hex 8
-      register: short_id
+        cmd: |
+          openssl rand -hex 8
+          openssl rand -hex 8
+          openssl rand -hex 4
+          openssl rand -hex 2
+          openssl rand -hex 1
+      register: short_ids_raw
+    - name: Parse Short IDs
+      set_fact:
+        short_ids: "{{ short_ids_raw.stdout_lines }}"
     - name: Generate default user
       shell:
         cmd: docker run --rm ghcr.io/xtls/xray-core uuid

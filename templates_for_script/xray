@@ -1,10 +1,19 @@
 {
   "log": {
-    "loglevel": "none"
+    "loglevel": "warning"
+  },
+  "dns": {
+    "servers": [
+      "1.1.1.1",
+      "8.8.8.8"
+    ],
+    "queryStrategy": "UseIPv4",
+    "disableFallback": false,
+    "tag": "dns-aux"
   },
   "inbounds": [
     {
-      "tag": "VLESS TCP VISION REALITY",
+      "tag": "VLESS-TCP-REALITY",
       "listen": "0.0.0.0",
       "port": 443,
       "protocol": "vless",
@@ -23,13 +32,19 @@
         "security": "reality",
         "realitySettings": {
           "xver": 1,
-          "dest": "127.0.0.1:4123",
+          "target": "127.0.0.1:4123",
           "serverNames": [
             "$VLESS_DOMAIN"
           ],
           "privateKey": "$XRAY_PIK",
+          "minClientVer": "1.8.0",
+          "maxTimeDiff": 60000,
           "shortIds": [
-            "$XRAY_SID"
+            "$XRAY_SID1",
+            "$XRAY_SID2",
+            "$XRAY_SID3",
+            "$XRAY_SID4",
+            "$XRAY_SID5"
           ]
         }
       },
@@ -37,7 +52,56 @@
         "enabled": true,
         "destOverride": [
           "http",
-          "tls"
+          "tls",
+          "quic"
+        ],
+        "routeOnly": true
+      }
+    },
+    {
+      "tag": "VLESS-XHTTP-REALITY",
+      "listen": "0.0.0.0",
+      "port": $XHTTP_PORT,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$XRAY_UUID",
+            "email": "default"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "reality",
+        "xhttpSettings": {
+          "path": "/api/v1/update",
+          "mode": "auto"
+        },
+        "realitySettings": {
+          "target": "127.0.0.1:4123",
+          "serverNames": [
+            "$VLESS_DOMAIN"
+          ],
+          "privateKey": "$XRAY_PIK",
+          "minClientVer": "1.8.0",
+          "maxTimeDiff": 60000,
+          "shortIds": [
+            "$XRAY_SID1",
+            "$XRAY_SID2",
+            "$XRAY_SID3",
+            "$XRAY_SID4",
+            "$XRAY_SID5"
+          ]
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
         ],
         "routeOnly": true
       }
@@ -57,21 +121,22 @@
     }
   ],
   "routing": {
+    "domainStrategy": "IPIfNonMatch",
     "rules": [
       {
-        "protocol": "bittorrent",
+        "type": "field",
+        "ip": [
+          "geoip:private"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "protocol": [
+          "bittorrent"
+        ],
         "outboundTag": "block"
       }
-    ],
-    "domainStrategy": "IPIfNonMatch"
-  },
-  "dns": {
-    "servers": [
-      "https+local://1.1.1.1/dns-query",
-      "https+local://8.8.8.8/dns-query"
-    ],
-    "queryStrategy": "UseIPv4",
-    "disableFallback": false,
-    "tag": "dns-aux"
+    ]
   }
 }

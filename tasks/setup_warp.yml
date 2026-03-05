@@ -1,9 +1,3 @@
-#- name: Add WARP GPG key
-#  ansible.builtin.get_url:
-#    url: https://pkg.cloudflareclient.com/pubkey.gpg
-#    dest: /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-#    mode: '0644'
-#    force: true
 - name: Add WARP GPG key
   ansible.builtin.shell:
     cmd: curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
@@ -11,7 +5,7 @@
   ansible.builtin.apt_repository:
     filename: cloudflare-client
     repo: "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ {{ ansible_facts['distribution_release'] }} main"
-- name:
+- name: Install cloudflare-warp
   apt:
     name: cloudflare-warp
     state: present
@@ -19,43 +13,12 @@
 - name: Register WARP
   shell:
     cmd: echo "y" | warp-cli registration new
-- shell:
+- name: Set WARP proxy mode
+  shell:
     cmd: warp-cli mode proxy
-- shell:
+- name: Set WARP proxy port
+  shell:
     cmd: warp-cli proxy port 40000
-- shell:
+- name: Connect WARP
+  shell:
     cmd: warp-cli connect
-- name: Edit xray config
-  block:
-    - command:
-        argv:
-          - yq
-          - eval
-          - '.outbounds += {"tag": "warp","protocol": "socks","settings": {"servers": [{"address": "127.0.0.1","port": 40000}]}}'
-          - -i
-          - /opt/xray-vps-setup/xray/config.json
-    - command:
-        argv:
-          - yq
-          - eval
-          - '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}'
-          - -i
-          - /opt/xray-vps-setup/xray/config.json
-  when: setup_variant == "xray"
-- name: Edit marzban config
-  block:
-    - command:
-        argv: 
-          - yq
-          - eval
-          - '.outbounds += {"tag": "warp","protocol": "socks","settings": {"servers": [{"address": "127.0.0.1","port": 40000}]}}'
-          - -i
-          - /opt/xray-vps-setup/marzban/xray_config.json
-    - command:
-        argv:
-          - yq
-          - eval
-          - '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}'
-          - -i
-          - /opt/xray-vps-setup/marzban/xray_config.json
-  when: setup_variant == "marzban"

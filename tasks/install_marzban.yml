@@ -3,10 +3,10 @@
     - name: Generate marzban password
       set_fact:
         MARZBAN_PASS: "{{ lookup('password', '/dev/null length=13 chars=ascii_letters') }}"
-    - name: Generate marzban password
+    - name: Generate marzban dashboard path
       set_fact:
         MARZBAN_PATH: "{{ lookup('password', '/dev/null length=8 chars=ascii_letters') }}"
-    - name: Generate marzban password
+    - name: Generate marzban subscription path
       set_fact:
         MARZBAN_SUB_PATH: "{{ lookup('password', '/dev/null length=8 chars=ascii_letters') }}"
 - name: Create dirs
@@ -17,6 +17,25 @@
     - /opt/xray-vps-setup/caddy
     - /opt/xray-vps-setup/marzban
     - /opt/xray-vps-setup/marzban/templates/home
+    - /opt/xray-vps-setup/marzban_lib/xray-core
+- name: Install unzip
+  apt:
+    name: unzip
+    state: present
+- name: Get latest Xray-core version
+  uri:
+    url: https://api.github.com/repos/XTLS/Xray-core/releases/latest
+    return_content: yes
+  register: xray_latest
+- name: Download latest Xray-core
+  get_url:
+    url: "https://github.com/XTLS/Xray-core/releases/download/{{ xray_latest.json.tag_name }}/Xray-linux-{{ 'arm64-v8a' if ansible_architecture == 'aarch64' else '64' }}.zip"
+    dest: /tmp/xray-core.zip
+- name: Extract Xray-core
+  unarchive:
+    src: /tmp/xray-core.zip
+    dest: /opt/xray-vps-setup/marzban_lib/xray-core
+    remote_src: yes
 - name: Copy config files
   ansible.builtin.template:
     src: "{{ item.src }}"

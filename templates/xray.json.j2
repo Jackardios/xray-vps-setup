@@ -1,20 +1,34 @@
 {
   "log": {
-    "loglevel": "info"
+    "loglevel": "warning"
+  },
+  "dns": {
+    "servers": [
+      "1.1.1.1",
+      "8.8.8.8"
+    ],
+    "queryStrategy": "UseIPv4",
+    "disableFallback": false,
+    "tag": "dns-aux"
   },
   "inbounds": [
     {
-      "tag": "VLESS TCP VISION REALITY",
+      "tag": "VLESS-TCP-REALITY",
       "listen": "0.0.0.0",
       "port": 443,
       "protocol": "vless",
       "settings": {
+{% if setup_variant == "marzban" %}
+        "clients": [],
+{% else %}
         "clients": [
-        {
-          "id": "{{ xray_uuid.stdout}}",
-          "email": "default",
-          "flow": "xtls-rprx-vision"
-        }],
+          {
+            "id": "{{ xray_uuid.stdout }}",
+            "email": "default",
+            "flow": "xtls-rprx-vision"
+          }
+        ],
+{% endif %}
         "decryption": "none"
       },
       "streamSettings": {
@@ -22,13 +36,18 @@
         "security": "reality",
         "realitySettings": {
           "xver": 1,
-          "dest": "127.0.0.1:4123",
+          "target": "127.0.0.1:4123",
           "serverNames": [
             "{{ domain }}"
           ],
           "privateKey": "{{ x25519_pik.stdout }}",
+          "minClientVer": "1.8.0",
+          "maxTimeDiff": 60000,
           "shortIds": [
-            "{{ short_id.stdout }}"
+{% for sid in short_ids %}
+            "{{ sid }}"{% if not loop.last %},{% endif %}
+
+{% endfor %}
           ]
         }
       },
@@ -36,7 +55,59 @@
         "enabled": true,
         "destOverride": [
           "http",
-          "tls"
+          "tls",
+          "quic"
+        ],
+        "routeOnly": true
+      }
+    },
+    {
+      "tag": "VLESS-XHTTP-REALITY",
+      "listen": "0.0.0.0",
+      "port": {{ xhttp_port | default(2087) }},
+      "protocol": "vless",
+      "settings": {
+{% if setup_variant == "marzban" %}
+        "clients": [],
+{% else %}
+        "clients": [
+          {
+            "id": "{{ xray_uuid.stdout }}",
+            "email": "default"
+          }
+        ],
+{% endif %}
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "reality",
+        "xhttpSettings": {
+          "path": "/api/v1/update",
+          "mode": "auto"
+        },
+        "realitySettings": {
+          "target": "127.0.0.1:4123",
+          "serverNames": [
+            "{{ domain }}"
+          ],
+          "privateKey": "{{ x25519_pik.stdout }}",
+          "minClientVer": "1.8.0",
+          "maxTimeDiff": 60000,
+          "shortIds": [
+{% for sid in short_ids %}
+            "{{ sid }}"{% if not loop.last %},{% endif %}
+
+{% endfor %}
+          ]
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
         ],
         "routeOnly": true
       }
@@ -53,24 +124,49 @@
     {
       "protocol": "blackhole",
       "tag": "block"
-    }
+    }{% if setup_warp|default(false)|bool %},
+    {
+      "tag": "warp",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "127.0.0.1",
+            "port": 40000
+          }
+        ]
+      }
+    }{% endif %}
+
   ],
   "routing": {
+    "domainStrategy": "IPIfNonMatch",
     "rules": [
       {
-        "protocol": "bittorrent",
+        "type": "field",
+        "ip": [
+          "geoip:private"
+        ],
         "outboundTag": "block"
-      }
-    ],
-    "domainStrategy": "IPIfNonMatch"
-  },
-  "dns": {
-    "servers": [
-      "https+local://1.1.1.1/dns-query",
-      "https+local://8.8.8.8/dns-query"
-    ],
-    "queryStrategy": "UseIPv4",
-    "disableFallback": false,
-    "tag": "dns-aux"
+      },
+      {
+        "type": "field",
+        "protocol": [
+          "bittorrent"
+        ],
+        "outboundTag": "block"
+      }{% if setup_warp|default(false)|bool %},
+      {
+        "type": "field",
+        "domain": [
+          "geosite:category-ru",
+          "regexp:.*\\.xn--[a-z0-9]+$",
+          "regexp:.*\\.ru$",
+          "regexp:.*\\.su$"
+        ],
+        "outboundTag": "warp"
+      }{% endif %}
+
+    ]
   }
 }

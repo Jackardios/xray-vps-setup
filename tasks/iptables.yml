@@ -37,6 +37,7 @@
         destination_ports:
           - "80"
           - "443"
+          - "{{ xhttp_port | default('2087') }}"
         jump: ACCEPT
     - name: Allow loopback in
       shell:
@@ -84,6 +85,7 @@
         destination_ports:
           - "80"
           - "443"
+          - "{{ xhttp_port | default('2087') }}"
         jump: ACCEPT
         ip_version: ipv6
     - name: Allow loopback in (IPv6)

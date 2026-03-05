@@ -1,6 +1,6 @@
 - name: Print clipboard string
   debug:
-    msg: "vless://{{ xray_uuid.stdout }}@{{ vless.domain }}:443?type=tcp&security=reality&pbk={{ x25519_pbk.stdout }}&fp=chrome&sni={{ vless.domain }}&sid={{ short_id.stdout }}&spx=%2F&flow=xtls-rprx-vision"
+    msg: "vless://{{ xray_uuid.stdout }}@{{ vless.domain }}:443?type=tcp&security=reality&pbk={{ x25519_pbk.stdout }}&fp=random&sni={{ vless.domain }}&sid={{ short_ids[0] }}&spx=%2F&flow=xtls-rprx-vision"
 - name: XRay outbound config 
   debug:
     msg: |
@@ -27,9 +27,9 @@
               "security": "reality",
               "realitySettings": {
                 "serverName": "{{ vless.domain }}",
-                "fingerprint": "chrome",
+                "fingerprint": "random",
                 "publicKey": "{{ x25519_pbk.stdout }}",
-                "shortId": "{{ short_id.stdout }}",
+                "shortId": "{{ short_ids[0] }}",
                 "spiderX": ""
               }
             }
@@ -49,15 +49,15 @@
                   "server_name": "{{ vless.domain }}",
                   "utls": {
                       "enabled": true,
-                      "fingerprint": "chrome"
+                      "fingerprint": "random"
                   },
                   "reality": {
                       "enabled": true,
                       "public_key": "{{ x25519_pbk.stdout }}",
-                      "short_id": "{{ short_id.stdout }}"
+                      "short_id": "{{ short_ids[0] }}"
                   }
               }
           }
 - name: Print PBK, SID and UUID to connect to server.
   debug:
-    msg: "UUID: {{ xray_uuid.stdout }}, SID: {{ short_id.stdout }}, PBK: {{ x25519_pbk.stdout }}"
+    msg: "UUID: {{ xray_uuid.stdout }}, SID: {{ short_ids[0] }}, PBK: {{ x25519_pbk.stdout }}"
