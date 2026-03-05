@@ -38,7 +38,7 @@
         argv:
           - yq
           - eval
-          - '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}'
+          - '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}'
           - -i
           - /opt/xray-vps-setup/xray/config.json
   when: setup_variant == "xray"
@@ -55,7 +55,7 @@
         argv:
           - yq
           - eval
-          - '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}'
+          - '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}'
           - -i
           - /opt/xray-vps-setup/marzban/xray_config.json
   when: setup_variant == "marzban"
