@@ -21,7 +21,7 @@
     "security": "reality",
     "realitySettings": {
       "serverName": "$VLESS_DOMAIN",
-      "fingerprint": "chrome",
+      "fingerprint": "random",
       "publicKey": "$XRAY_PBK",
       "shortId": "$XRAY_SID",
       "spiderX": ""
