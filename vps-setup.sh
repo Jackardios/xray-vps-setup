@@ -3,7 +3,7 @@
 set -e
 
 export GIT_BRANCH="main"
-export GIT_REPO="Akiyamov/xray-vps-setup"
+export GIT_REPO="jackardios/xray-vps-setup"
 
 # Check if script started as root
 if [ "$EUID" -ne 0 ]
