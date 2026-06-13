@@ -29,7 +29,9 @@
           ],
           "privateKey": "$XRAY_PIK",
           "shortIds": [
-            "$XRAY_SID"
+            "$XRAY_SID",
+            "$XRAY_SID2",
+            "$XRAY_SID3"
           ]
         }
       },

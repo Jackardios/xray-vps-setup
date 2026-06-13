@@ -11,6 +11,9 @@ http {
     log_format main '[$time_local] $proxy_protocol_addr "$http_referer" "$http_user_agent"';
     access_log /var/log/angie/access.log main;
 
+    # Hide the angie version from the Server header and error pages.
+    server_tokens off;
+
     map $http_upgrade $connection_upgrade {
         default upgrade;
         ""      close;
@@ -77,9 +80,25 @@ http {
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         }
 
+        location = /robots.txt {
+            default_type text/plain;
+            return 200 "User-agent: *\nDisallow:\n";
+        }
+
+        location = /favicon.ico {
+            return 204;
+        }
+
         location / {
             root /tmp;
             index index.html;
+            try_files $uri $uri/ =404;
+        }
+
+        error_page 404 @notfound;
+        location @notfound {
+            default_type text/html;
+            return 404 "<!doctype html><title>404 Not Found</title><h1>Not Found</h1>";
         }
     }
 }

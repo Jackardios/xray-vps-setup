@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="build" content="$DECOY_NONCE">
+  <title>$DECOY_TITLE</title>
+  <link rel="icon" href="/favicon.ico?v=$DECOY_NONCE">
+  <style>
+    :root {
+      --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3;
+      --muted:#8b949e; --accent:#2f81f7; --accent-fg:#ffffff; --danger:#f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--fg);
+    }
+    .card {
+      width: 340px; max-width: calc(100vw - 32px);
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      padding: 28px 26px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+    .mark {
+      width: 28px; height: 28px; border-radius: 7px;
+      background: linear-gradient(135deg, var(--accent), #1f6feb); flex: 0 0 auto;
+    }
+    .brand b { font-size: 18px; letter-spacing: .2px; }
+    .subtitle { color: var(--muted); font-size: 13px; margin: 2px 0 22px; }
+    label { display: block; font-size: 13px; color: var(--muted); margin: 0 0 6px; }
+    input[type=text], input[type=password] {
+      width: 100%; padding: 10px 12px; margin-bottom: 16px;
+      background: #0d1117; border: 1px solid var(--border); border-radius: 7px;
+      color: var(--fg); font-size: 14px;
+    }
+    input:focus { outline: none; border-color: var(--accent); }
+    .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+    .row label { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 13px; color: var(--fg); }
+    .row a { color: var(--accent); text-decoration: none; font-size: 13px; }
+    button {
+      width: 100%; padding: 11px; border: 0; border-radius: 7px;
+      background: var(--accent); color: var(--accent-fg); font-size: 14px; font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: #1f6feb; }
+    .err {
+      display: none; margin-bottom: 16px; padding: 9px 12px; border-radius: 7px;
+      background: rgba(248,81,73,.12); border: 1px solid rgba(248,81,73,.4);
+      color: var(--danger); font-size: 13px;
+    }
+    .foot { color: var(--muted); font-size: 12px; margin-top: 22px; text-align: center; }
+    .foot a { color: var(--muted); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <!-- build: $DECOY_NONCE -->
+  <div class="card">
+    <div class="brand">
+      <span class="mark"></span>
+      <b>$DECOY_BRAND</b>
+    </div>
+    <div class="subtitle">$DECOY_TAGLINE</div>
+
+    <div class="err" id="err">Invalid username or password.</div>
+
+    <form id="loginForm" action="/" autocomplete="off">
+      <label for="username">Username or email</label>
+      <input type="text" id="username" name="username" autocomplete="off">
+
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="off">
+
+      <div class="row">
+        <label><input type="checkbox" name="remember"> Keep me signed in</label>
+        <a href="/">Forgot password?</a>
+      </div>
+
+      <button type="submit">Sign in</button>
+    </form>
+
+    <div class="foot">Authorized access only &middot; &copy; 2025 $DECOY_BRAND</div>
+  </div>
+
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.getElementById('err').style.display = 'block';
+      document.getElementById('password').value = '';
+    });
+  </script>
+</body>
+</html>

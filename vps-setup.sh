@@ -55,6 +55,17 @@ download_xray_core() {
   unzip -qo /tmp/xray.zip -d "$dest"
 }
 
+# Write a per-deploy-unique decoy page to ./index.html (the masking site angie
+# serves at /). Brand/tagline/nonce are randomised so every deployment differs
+# byte-for-byte, which defeats exact-hash fingerprinting of a shared decoy.
+write_decoy() {
+  export DECOY_BRAND=$(shuf -n1 -e Northwind Lumira Veltro Caldera Brixton Auralis Meridian Halcyon Everstone Tindle)
+  export DECOY_TAGLINE=$(shuf -n1 -e "Authentication required" "Sign in to continue" "Please sign in to continue" "Enter your credentials to continue" "Sign in to your account")
+  export DECOY_TITLE="Sign in · $DECOY_BRAND"
+  export DECOY_NONCE=$(openssl rand -hex 16)
+  fetch "$RAW/decoy" '$DECOY_BRAND $DECOY_TAGLINE $DECOY_TITLE $DECOY_NONCE' > ./index.html
+}
+
 # Check if script started as root
 if [ "$EUID" -ne 0 ]
   then echo "Please run as root"
@@ -202,8 +213,12 @@ export SSH_USER=$(grep -E '^[a-z]{4,6}$' /usr/share/dict/words | shuf -n 1)
 export SSH_USER_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13; echo)
 export SSH_PORT=${input_ssh_port:-22}
 if [[ "$INSTALL_MODE" != "node" ]]; then
-  # Reality shortId — a real (non-empty) id, so a client must present it to connect.
+  # Reality shortIds — real (non-empty) ids of varying even length, so a client
+  # must present a known id to connect. The first is the one handed to clients;
+  # the extras let you issue distinct ids per device later without reconfiguring.
   export XRAY_SID=$(openssl rand -hex 8)
+  export XRAY_SID2=$(openssl rand -hex 4)
+  export XRAY_SID3=$(openssl rand -hex 2)
   # One x25519 invocation gives both keys. Parse by the last whitespace field so
   # we are robust to xray's changing labels ("Public key" -> "Password" ->
   # "Password (PublicKey)").
@@ -221,7 +236,7 @@ fi
 xray_setup() {
   mkdir -p /opt/xray-vps-setup
   cd /opt/xray-vps-setup
-  fetch "$RAW/confluence" '' > ./index.html
+  write_decoy
   if [[ "${marzban_input,,}" == "y" ]]; then
     apt install zip unzip -y
     mkdir -p /opt/xray-vps-setup/marzban
@@ -233,11 +248,11 @@ xray_setup() {
     fetch "$RAW/compose-marzban" '' > ./docker-compose.yml
     fetch "$RAW/marzban" '$MARZBAN_USER $MARZBAN_PASS $MARZBAN_PATH $MARZBAN_SUB_PATH $VLESS_DOMAIN' > ./marzban/.env
     fetch "$RAW/angie-marzban" '$VLESS_DOMAIN $MARZBAN_PATH $MARZBAN_SUB_PATH' > ./angie.conf
-    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID' > ./marzban/xray_config.json
+    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID $XRAY_SID2 $XRAY_SID3' > ./marzban/xray_config.json
   else
     mkdir -p /opt/xray-vps-setup/xray
     fetch "$RAW/compose-xray" '$XRAY_VERSION' > ./docker-compose.yml
-    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID' > ./xray/config.json
+    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID $XRAY_SID2 $XRAY_SID3' > ./xray/config.json
     fetch "$RAW/angie" '$VLESS_DOMAIN' > ./angie.conf
   fi
 }
@@ -245,7 +260,7 @@ xray_setup() {
 node_setup() {
   mkdir -p /opt/xray-vps-setup
   cd /opt/xray-vps-setup
-  fetch "$RAW/confluence" '' > ./index.html
+  write_decoy
   apt install zip unzip -y
   download_xray_core /opt/xray-vps-setup/xray-core
   # Placeholder - will be replaced with panel cert by node_api_setup
