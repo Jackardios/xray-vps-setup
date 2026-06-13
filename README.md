@@ -14,7 +14,7 @@ VLESS со своим доменом. А что еще нужно для сча�
 
 ```bash
 tmux
-bash <(wget -qO- https://raw.githubusercontent.com/Akiyamov/xray-vps-setup/refs/heads/main/vps-setup.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/Jackardios/xray-vps-setup/refs/heads/main/vps-setup.sh)
 ```
 
 ## Добавляем подписку и поддержку Mihomo
@@ -27,7 +27,7 @@ bash <(wget -qO- https://github.com/legiz-ru/marz-sub/raw/main/marz-sub.sh)
 
 ## Ручная установка
 
-Описана [здесь](https://github.com/Akiyamov/xray-vps-setup/blob/main/install_in_docker.md).
+Описана [здесь](https://github.com/Jackardios/xray-vps-setup/blob/main/install_in_docker.md).
 
 ## Почему не <strike>nginx</strike>caddy, haproxy, 3x-ui, x-ui, sing-box...
 
