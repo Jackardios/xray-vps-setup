@@ -543,11 +543,11 @@ xray_setup() {
     fetch "$RAW/compose-marzban" '' > ./docker-compose.yml
     fetch "$RAW/marzban" '$MARZBAN_USER $MARZBAN_PASS $MARZBAN_PATH $MARZBAN_SUB_PATH $VLESS_DOMAIN' > ./marzban/.env
     fetch "$RAW/angie-marzban" '$VLESS_DOMAIN $MARZBAN_PATH $MARZBAN_SUB_PATH $HAPP_BLOCK' > ./angie.conf
-    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID $XRAY_SID2 $XRAY_SID3 $LISTEN_ADDR' > ./marzban/xray_config.json
+    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_PBK $XRAY_SID $XRAY_SID2 $XRAY_SID3 $LISTEN_ADDR' > ./marzban/xray_config.json
   else
     mkdir -p /opt/xray-vps-setup/xray
     fetch "$RAW/compose-xray" '$XRAY_VERSION' > ./docker-compose.yml
-    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID $XRAY_SID2 $XRAY_SID3 $LISTEN_ADDR' > ./xray/config.json
+    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_PBK $XRAY_SID $XRAY_SID2 $XRAY_SID3 $LISTEN_ADDR' > ./xray/config.json
     fetch "$RAW/angie" '$VLESS_DOMAIN' > ./angie.conf
   fi
 

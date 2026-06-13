@@ -27,6 +27,7 @@
           "serverNames": [
             "$VLESS_DOMAIN"
           ],
+          "publicKey": "$XRAY_PBK",
           "privateKey": "$XRAY_PIK",
           "shortIds": [
             "$XRAY_SID",
