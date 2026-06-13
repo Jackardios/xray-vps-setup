@@ -9,8 +9,9 @@
   <link rel="icon" href="/favicon.ico?v=$DECOY_NONCE">
   <style>
     :root {
-      --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3;
-      --muted:#8b949e; --accent:#2f81f7; --accent-fg:#ffffff; --danger:#f85149;
+      --bg:$DECOY_BG; --panel:$DECOY_PANEL; --border:$DECOY_BORDER; --fg:$DECOY_FG;
+      --muted:$DECOY_MUTED; --accent:$DECOY_ACCENT; --accent2:$DECOY_ACCENT2;
+      --accent-fg:$DECOY_ACCENT_FG; --input-bg:$DECOY_INPUT_BG; --danger:#f85149;
     }
     * { box-sizing: border-box; }
     body {
@@ -27,14 +28,14 @@
     .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
     .mark {
       width: 28px; height: 28px; border-radius: 7px;
-      background: linear-gradient(135deg, var(--accent), #1f6feb); flex: 0 0 auto;
+      background: linear-gradient(135deg, var(--accent), var(--accent2)); flex: 0 0 auto;
     }
     .brand b { font-size: 18px; letter-spacing: .2px; }
     .subtitle { color: var(--muted); font-size: 13px; margin: 2px 0 22px; }
     label { display: block; font-size: 13px; color: var(--muted); margin: 0 0 6px; }
     input[type=text], input[type=password] {
       width: 100%; padding: 10px 12px; margin-bottom: 16px;
-      background: #0d1117; border: 1px solid var(--border); border-radius: 7px;
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 7px;
       color: var(--fg); font-size: 14px;
     }
     input:focus { outline: none; border-color: var(--accent); }
@@ -46,7 +47,7 @@
       background: var(--accent); color: var(--accent-fg); font-size: 14px; font-weight: 600;
       cursor: pointer;
     }
-    button:hover { background: #1f6feb; }
+    button:hover { background: var(--accent2); }
     .err {
       display: none; margin-bottom: 16px; padding: 9px 12px; border-radius: 7px;
       background: rgba(248,81,73,.12); border: 1px solid rgba(248,81,73,.4);
@@ -82,7 +83,7 @@
       <button type="submit">Sign in</button>
     </form>
 
-    <div class="foot">Authorized access only &middot; &copy; 2025 $DECOY_BRAND</div>
+    <div class="foot">Authorized access only &middot; &copy; $DECOY_YEAR $DECOY_BRAND</div>
   </div>
 
   <script>

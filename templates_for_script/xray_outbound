@@ -24,7 +24,7 @@
       "fingerprint": "firefox",
       "publicKey": "$XRAY_PBK",
       "shortId": "$XRAY_SID",
-      "spiderX": ""
+      "spiderX": "/"
     }
   }
 }

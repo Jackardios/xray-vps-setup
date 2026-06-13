@@ -55,6 +55,36 @@ download_xray_core() {
   unzip -qo /tmp/xray.zip -d "$dest"
 }
 
+# Signal-1 hosting check (DPI-evasion): subnets of some providers have been
+# historically throttled/blocked by Russian DPI regardless of a clean Reality
+# config. We query OUR OWN public org via ipinfo.io and WARN (do NOT block) if
+# it's on the flagged list, pointing at hyperion-cs/dpi-checkers to verify the
+# specific subnet. Advisory only: a match doesn't break the install, and an
+# unreachable ipinfo must never abort it.
+check_hosting_asn() {
+  local org
+  # --max-time bounds a hung endpoint; || true keeps set -e from aborting on any
+  # curl non-zero (timeout, DNS, no route). The grep below runs in an if-test, so
+  # its "no match" non-zero is set -e-safe too.
+  org=$(curl -s --max-time 5 https://ipinfo.io/org || true)
+  if [ -z "$org" ]; then
+    echo "Note: couldn't determine hosting ASN (network/timeout) — skipping hosting check"
+    return 0
+  fi
+  if echo "$org" | grep -qiE 'selectel|yandex|hetzner|digitalocean|digital ocean|ovh'; then
+    echo "============================================================"
+    echo "WARNING: this server's network looks like a provider whose"
+    echo "subnets have been flagged by Russian DPI:"
+    echo "  $org"
+    echo
+    echo "Reality masking still works, but the IP range itself may be"
+    echo "throttled/blocked. Verify THIS subnet before relying on it:"
+    echo "  https://github.com/hyperion-cs/dpi-checkers"
+    echo "Continuing — this is an advisory, not a blocker."
+    echo "============================================================"
+  fi
+}
+
 # Write a per-deploy-unique decoy page to ./index.html (the masking site angie
 # serves at /). Brand/tagline/nonce are randomised so every deployment differs
 # byte-for-byte, which defeats exact-hash fingerprinting of a shared decoy.
@@ -63,7 +93,35 @@ write_decoy() {
   export DECOY_TAGLINE=$(shuf -n1 -e "Authentication required" "Sign in to continue" "Please sign in to continue" "Enter your credentials to continue" "Sign in to your account")
   export DECOY_TITLE="Sign in · $DECOY_BRAND"
   export DECOY_NONCE=$(openssl rand -hex 16)
-  fetch "$RAW/decoy" '$DECOY_BRAND $DECOY_TAGLINE $DECOY_TITLE $DECOY_NONCE' > ./index.html
+  # Dynamic year: footer is never stale and varies year-over-year.
+  export DECOY_YEAR=$(date +%Y)
+  # One internally-consistent palette per deploy so the decoy CSS isn't a
+  # byte-for-byte constant across servers (defeats palette-hash fingerprinting).
+  # shuf gives the randomness (bash, not JS). Each theme keeps bg-vs-fg contrast
+  # correct (incl. the light theme) so every variant is a legible sign-in gate.
+  case "$(shuf -n1 -e 1 2 3 4)" in
+    1) # github-dark (original)
+      export DECOY_BG="#0d1117"; export DECOY_PANEL="#161b22"; export DECOY_BORDER="#30363d"
+      export DECOY_FG="#e6edf3"; export DECOY_MUTED="#8b949e"
+      export DECOY_ACCENT="#2f81f7"; export DECOY_ACCENT2="#1f6feb"
+      export DECOY_ACCENT_FG="#ffffff"; export DECOY_INPUT_BG="#0d1117" ;;
+    2) # slate / indigo (dark)
+      export DECOY_BG="#0f172a"; export DECOY_PANEL="#1e293b"; export DECOY_BORDER="#334155"
+      export DECOY_FG="#e2e8f0"; export DECOY_MUTED="#94a3b8"
+      export DECOY_ACCENT="#6366f1"; export DECOY_ACCENT2="#4f46e5"
+      export DECOY_ACCENT_FG="#ffffff"; export DECOY_INPUT_BG="#0f172a" ;;
+    3) # light (dark fg on light bg keeps contrast correct)
+      export DECOY_BG="#f6f8fa"; export DECOY_PANEL="#ffffff"; export DECOY_BORDER="#d0d7de"
+      export DECOY_FG="#1f2328"; export DECOY_MUTED="#656d76"
+      export DECOY_ACCENT="#0969da"; export DECOY_ACCENT2="#0860ca"
+      export DECOY_ACCENT_FG="#ffffff"; export DECOY_INPUT_BG="#ffffff" ;;
+    4) # midnight / teal (dark)
+      export DECOY_BG="#0b1220"; export DECOY_PANEL="#111c2e"; export DECOY_BORDER="#1f2d44"
+      export DECOY_FG="#dbe7f0"; export DECOY_MUTED="#7d93a8"
+      export DECOY_ACCENT="#14b8a6"; export DECOY_ACCENT2="#0d9488"
+      export DECOY_ACCENT_FG="#04201c"; export DECOY_INPUT_BG="#0b1220" ;;
+  esac
+  fetch "$RAW/decoy" '$DECOY_BRAND $DECOY_TAGLINE $DECOY_TITLE $DECOY_NONCE $DECOY_YEAR $DECOY_BG $DECOY_PANEL $DECOY_BORDER $DECOY_FG $DECOY_MUTED $DECOY_ACCENT $DECOY_ACCENT2 $DECOY_ACCENT_FG $DECOY_INPUT_BG' > ./index.html
 }
 
 # Check if script started as root
@@ -72,9 +130,9 @@ if [ "$EUID" -ne 0 ]
   exit
 fi
 
-# Install idn 
+# Install idn
 apt-get update
-apt-get install idn sudo dnsutils wamerican -y 
+apt-get install idn sudo dnsutils wamerican curl -y
 
 # Select install mode
 echo "What do you want to install?"
@@ -128,12 +186,16 @@ else
     read -ep "Continue anyway? [y/N]"$'\n' prompt_response
     if [[ "$prompt_response" =~ ^([yY])$ ]]; then
       echo "Ok, proceeding"
-    else 
+    else
       echo "Come back later"
       exit 1
     fi
   fi
 fi
+
+# Advisory hosting/ASN check for every install mode (xray/marzban/node): all of
+# them terminate Reality on this host's subnet, so the warning is mode-agnostic.
+check_hosting_asn
 
 if [[ "$INSTALL_MODE" == "node" ]]; then
   read -ep "Enter marzban panel domain (e.g. panel.example.com):"$'\n' PANEL_DOMAIN
