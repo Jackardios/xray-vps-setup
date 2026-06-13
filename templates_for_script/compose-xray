@@ -9,7 +9,7 @@ services:
       - ./angie.conf:/etc/angie/angie.conf
       - ./index.html:/tmp/index.html
   xray:
-    image: ghcr.io/xtls/xray-core:latest
+    image: ghcr.io/xtls/xray-core:$XRAY_VERSION
     container_name: xray
     restart: always
     network_mode: host

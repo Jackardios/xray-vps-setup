@@ -71,7 +71,7 @@ sysctl -p
 ### Установка Docker
 Для установки нужно выполнить следующую команду:
 ```bash
-bash <(wget -qO- https://get.docker.com) @ -o get-docker.sh
+curl -fsSL https://get.docker.com | sh
 ```
 Если вы работаете не от админа, то выполните следующие команды, чтобы не писать `sudo` каждый раз:
 ```bash
@@ -437,7 +437,7 @@ wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O 
 Далее с помощью `yq` мы установим в уже существующий кофниг WARP:
 ```bash
 yq eval '.outbounds += {"tag": "warp","protocol": "socks","settings": {"servers": [{"address": "127.0.0.1","port": 40000}]}}' -i $XRAY_CONFIG_WARP
-yq eval '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}' -i $XRAY_CONFIG_WARP
+yq eval '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}' -i $XRAY_CONFIG_WARP
 
 ```
 Заменяем $XRAY_CONFIG_WARP на `/opt/xray-vps-setup/marzban/xray_config.json` для marzban и на `/opt/xray-vps-setup/xray/config.json` для чистого xray. После этого перезапускаем все:

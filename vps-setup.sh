@@ -5,6 +5,56 @@ set -e
 export GIT_BRANCH="main"
 export GIT_REPO="Akiyamov/xray-vps-setup"
 
+# Pinned xray-core version, used consistently for keygen, uuid, the downloaded
+# binary and the compose image so a deployment is reproducible.
+export XRAY_VERSION="26.3.27"
+export XRAY_IMAGE="ghcr.io/xtls/xray-core:${XRAY_VERSION}"
+
+# Base URL for the template files shipped in this repo.
+RAW="https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script"
+
+# Remove transient files that may contain secrets/certs/tokens on any exit.
+cleanup() {
+  rm -f /tmp/xray.zip \
+        /tmp/node_settings.json /tmp/node_response.json /tmp/nodes_list.json \
+        /tmp/xray_config.json /tmp/xray_config_updated.json \
+        /tmp/marzban_inbounds.json /tmp/marzban_hosts.json /tmp/marzban_hosts_updated.json \
+        /tmp/panel_hosts.json /tmp/panel_hosts_updated.json \
+        /tmp/update_servernames.py /tmp/update_hosts.py 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# Download a template from the repo and substitute ONLY the whitelisted vars.
+# Fails loudly on network error or empty response so a broken download never
+# silently produces an empty config file. Usage: fetch <url> '<$VAR1 $VAR2 ...>'
+fetch() {
+  local url="$1"; shift
+  local content
+  if ! content=$(wget -qO- "$url"); then
+    echo "ERROR: failed to download $url" >&2
+    exit 1
+  fi
+  if [ -z "$content" ]; then
+    echo "ERROR: empty response from $url" >&2
+    exit 1
+  fi
+  printf '%s' "$content" | envsubst "$@"
+}
+
+# Download and extract the xray-core binary for the current architecture.
+download_xray_core() {
+  local dest="$1"
+  local url
+  case "$ARCH" in
+    amd64) url="https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip" ;;
+    arm64) url="https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-arm64-v8a.zip" ;;
+    *) echo "ERROR: unsupported architecture: $ARCH" >&2; exit 1 ;;
+  esac
+  wget -O /tmp/xray.zip "$url" || { echo "ERROR: failed to download xray-core from $url" >&2; exit 1; }
+  mkdir -p "$dest"
+  unzip -qo /tmp/xray.zip -d "$dest"
+}
+
 # Check if script started as root
 if [ "$EUID" -ne 0 ]
   then echo "Please run as root"
@@ -31,35 +81,38 @@ esac
 # Read domain input
 read -ep "Enter your domain:"$'\n' input_domain
 
-export VLESS_DOMAIN=$(echo $input_domain | idn)
+export VLESS_DOMAIN=$(echo "$input_domain" | idn)
 
 SERVER_IPS=($(hostname -I))
 
-RESOLVED_IP=$(dig +short $VLESS_DOMAIN | tail -n1)
+# Collect every A record, not just the last one (domains may have several).
+RESOLVED_IPS=$(dig +short A "$VLESS_DOMAIN" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)
 
-if [ -z "$RESOLVED_IP" ]; then
+if [ -z "$RESOLVED_IPS" ]; then
   echo "Warning: Domain has no DNS record"
   read -ep "Are you sure? That domain has no DNS record. If you didn't add that you will have to restart xray and angie by yourself [y/N]"$'\n' prompt_response
   if [[ "$prompt_response" =~ ^([yY])$ ]]; then
     echo "Ok, proceeding without DNS verification"
-  else 
+  else
     echo "Come back later"
     exit 1
   fi
 else
   MATCH_FOUND=false
-  for server_ip in "${SERVER_IPS[@]}"; do
-    if [ "$RESOLVED_IP" == "$server_ip" ]; then
-      MATCH_FOUND=true
-      break
-    fi
+  for resolved_ip in $RESOLVED_IPS; do
+    for server_ip in "${SERVER_IPS[@]}"; do
+      if [ "$resolved_ip" == "$server_ip" ]; then
+        MATCH_FOUND=true
+        break 2
+      fi
+    done
   done
-  
+
   if [ "$MATCH_FOUND" = true ]; then
-    echo "✓ DNS record points to this server ($RESOLVED_IP)"
+    echo "✓ DNS record points to this server"
   else
     echo "Warning: DNS record exists but points to different IP"
-    echo "  Domain resolves to: $RESOLVED_IP"
+    echo "  Domain resolves to: $(echo $RESOLVED_IPS | tr '\n' ' ')"
     echo "  This server's IPs: ${SERVER_IPS[*]}"
     read -ep "Continue anyway? [y/N]"$'\n' prompt_response
     if [[ "$prompt_response" =~ ^([yY])$ ]]; then
@@ -97,14 +150,14 @@ if [[ ${configure_ssh_input,,} == "y" ]]; then
   done
   # Read SSH Pubkey
   read -ep "Enter SSH public key:"$'\n' input_ssh_pbk
-  echo "$input_ssh_pbk" > ./test_pbk
-  ssh-keygen -l -f ./test_pbk
-  PBK_STATUS=$(echo $?)
-  if [ "$PBK_STATUS" -eq 255 ]; then
-    echo "Can't verify the public key. Try again and make sure to include 'ssh-rsa' or 'ssh-ed25519' followed by 'user@pcname' at the end of the file."
-    exit
+  pbk_tmp=$(mktemp)
+  printf '%s\n' "$input_ssh_pbk" > "$pbk_tmp"
+  if ! ssh-keygen -l -f "$pbk_tmp" >/dev/null 2>&1; then
+    rm -f "$pbk_tmp"
+    echo "Can't verify the public key. Try again and make sure to include 'ssh-rsa' or 'ssh-ed25519' followed by a comment at the end."
+    exit 1
   fi
-  rm ./test_pbk
+  rm -f "$pbk_tmp"
 fi
 
 configure_warp_input="n"
@@ -149,58 +202,56 @@ export SSH_USER=$(grep -E '^[a-z]{4,6}$' /usr/share/dict/words | shuf -n 1)
 export SSH_USER_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13; echo)
 export SSH_PORT=${input_ssh_port:-22}
 if [[ "$INSTALL_MODE" != "node" ]]; then
-  export XRAY_PIK=$(docker run --rm ghcr.io/xtls/xray-core:26.3.27 x25519 | head -n1 | cut -d' ' -f 2)
-  export XRAY_PBK=$(docker run --rm ghcr.io/xtls/xray-core:26.3.27 x25519 -i $XRAY_PIK | tail -2 | head -1 | cut -d' ' -f 3)
-  export XRAY_UUID=$(docker run --rm ghcr.io/xtls/xray-core uuid)
+  # Reality shortId — a real (non-empty) id, so a client must present it to connect.
+  export XRAY_SID=$(openssl rand -hex 8)
+  # One x25519 invocation gives both keys. Parse by the last whitespace field so
+  # we are robust to xray's changing labels ("Public key" -> "Password" ->
+  # "Password (PublicKey)").
+  xray_keys=$(docker run --rm "$XRAY_IMAGE" x25519)
+  export XRAY_PIK=$(printf '%s\n' "$xray_keys" | grep -iE 'private' | awk '{print $NF}')
+  export XRAY_PBK=$(printf '%s\n' "$xray_keys" | grep -iE 'password|public' | awk '{print $NF}')
+  export XRAY_UUID=$(docker run --rm "$XRAY_IMAGE" uuid)
+  if [[ -z "$XRAY_PIK" || -z "$XRAY_PBK" || -z "$XRAY_UUID" ]]; then
+    echo "ERROR: failed to generate xray keys/uuid (image $XRAY_IMAGE)" >&2
+    exit 1
+  fi
 fi
 
 # Install marzban
 xray_setup() {
   mkdir -p /opt/xray-vps-setup
   cd /opt/xray-vps-setup
-  wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/confluence" | envsubst > ./index.html
+  fetch "$RAW/confluence" '' > ./index.html
   if [[ "${marzban_input,,}" == "y" ]]; then
-    apt install zip unzip -y 
+    apt install zip unzip -y
     mkdir -p /opt/xray-vps-setup/marzban
     export MARZBAN_USER=$(grep -E '^[a-z]{4,6}$' /usr/share/dict/words | shuf -n 1)
     export MARZBAN_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13; echo)
     export MARZBAN_PATH=$(openssl rand -hex 8)
     export MARZBAN_SUB_PATH=$(openssl rand -hex 8)
-    mkdir -p /opt/xray-vps-setup/xray-core
-    if [[ "$ARCH" == "amd64" ]]; then
-      wget -O /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.2.6/Xray-linux-64.zip
-    elif [[ "$ARCH" == "arm64" ]]; then
-      wget -O /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.2.6/Xray-linux-arm64-v8a.zip
-    fi
-    unzip -qo /tmp/xray.zip -d /opt/xray-vps-setup/xray-core
-    wget -qO- https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/compose-marzban | envsubst > ./docker-compose.yml
-    wget -qO- https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/marzban | envsubst > ./marzban/.env
-    wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/angie-marzban" | envsubst '$VLESS_DOMAIN $MARZBAN_PATH $MARZBAN_SUB_PATH' > ./angie.conf
-    wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/xray" | envsubst > ./marzban/xray_config.json
+    download_xray_core /opt/xray-vps-setup/xray-core
+    fetch "$RAW/compose-marzban" '' > ./docker-compose.yml
+    fetch "$RAW/marzban" '$MARZBAN_USER $MARZBAN_PASS $MARZBAN_PATH $MARZBAN_SUB_PATH $VLESS_DOMAIN' > ./marzban/.env
+    fetch "$RAW/angie-marzban" '$VLESS_DOMAIN $MARZBAN_PATH $MARZBAN_SUB_PATH' > ./angie.conf
+    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID' > ./marzban/xray_config.json
   else
     mkdir -p /opt/xray-vps-setup/xray
-    wget -qO- https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/compose-xray | envsubst > ./docker-compose.yml
-    wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/xray" | envsubst > ./xray/config.json
-    wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/angie" | envsubst '$VLESS_DOMAIN'  > ./angie.conf
+    fetch "$RAW/compose-xray" '$XRAY_VERSION' > ./docker-compose.yml
+    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID' > ./xray/config.json
+    fetch "$RAW/angie" '$VLESS_DOMAIN' > ./angie.conf
   fi
 }
 
 node_setup() {
   mkdir -p /opt/xray-vps-setup
   cd /opt/xray-vps-setup
-  wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/confluence" | envsubst > ./index.html
+  fetch "$RAW/confluence" '' > ./index.html
   apt install zip unzip -y
-  mkdir -p ./xray-core
-  if [[ "$ARCH" == "amd64" ]]; then
-    wget -O /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.2.6/Xray-linux-64.zip
-  elif [[ "$ARCH" == "arm64" ]]; then
-    wget -O /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.2.6/Xray-linux-arm64-v8a.zip
-  fi
-  unzip -qo /tmp/xray.zip -d ./xray-core
+  download_xray_core /opt/xray-vps-setup/xray-core
   # Placeholder - will be replaced with panel cert by node_api_setup
   touch ./ssl_client_cert.pem
-  wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/compose-node" | envsubst > ./docker-compose.yml
-  wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/angie" | envsubst '$VLESS_DOMAIN' > ./angie.conf
+  fetch "$RAW/compose-node" '' > ./docker-compose.yml
+  fetch "$RAW/angie" '$VLESS_DOMAIN' > ./angie.conf
 }
 
 node_api_setup() {
@@ -330,6 +381,8 @@ for inbound_tag, host_list in hosts.items():
     protocol = info.get('protocol', inbound_tag)
     transport = info.get('network', 'tcp')
     remark = f'{node_name} ({panel_user}) [{protocol} - {transport}]'
+    if any(h.get('address') == node_domain and h.get('remark') == remark for h in host_list):
+        continue
     host_list.append({
         'remark': remark,
         'address': node_domain,
@@ -339,7 +392,7 @@ for inbound_tag, host_list in hosts.items():
         'path': None,
         'security': 'inbound_default',
         'alpn': '',
-        'fingerprint': 'chrome',
+        'fingerprint': 'firefox',
         'allowinsecure': None,
         'is_disabled': None,
         'mux_enable': None,
@@ -369,22 +422,28 @@ else
 fi
 
 sshd_edit() {
-  wget -qO- https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/00-disable-password | envsubst > /etc/ssh/sshd_config.d/00-disable-password.conf
+  fetch "$RAW/00-disable-password" '$SSH_PORT' > /etc/ssh/sshd_config.d/00-disable-password.conf
+  # Validate the config before restarting so a typo can never lock us out.
+  if ! sshd -t; then
+    echo "ERROR: new sshd config is invalid; removing it to avoid lockout." >&2
+    rm -f /etc/ssh/sshd_config.d/00-disable-password.conf
+    exit 1
+  fi
   systemctl daemon-reload
   systemctl restart ssh
 }
 
 add_user() {
-  useradd $SSH_USER -s /bin/bash
-  usermod -aG sudo $SSH_USER
-  echo $SSH_USER:$SSH_USER_PASS | chpasswd
-  mkdir -p /home/$SSH_USER/.ssh
-  touch /home/$SSH_USER/.ssh/authorized_keys
-  echo $input_ssh_pbk >> /home/$SSH_USER/.ssh/authorized_keys
-  chmod 700 /home/$SSH_USER/.ssh/
-  chmod 600 /home/$SSH_USER/.ssh/authorized_keys
-  chown $SSH_USER:$SSH_USER -R /home/$SSH_USER
-  usermod -aG docker $SSH_USER
+  useradd "$SSH_USER" -s /bin/bash
+  usermod -aG sudo "$SSH_USER"
+  echo "$SSH_USER:$SSH_USER_PASS" | chpasswd
+  mkdir -p "/home/$SSH_USER/.ssh"
+  touch "/home/$SSH_USER/.ssh/authorized_keys"
+  printf '%s\n' "$input_ssh_pbk" >> "/home/$SSH_USER/.ssh/authorized_keys"
+  chmod 700 "/home/$SSH_USER/.ssh/"
+  chmod 600 "/home/$SSH_USER/.ssh/authorized_keys"
+  chown "$SSH_USER:$SSH_USER" -R "/home/$SSH_USER"
+  usermod -aG docker "$SSH_USER"
 }
 
 debconf-set-selections <<EOF
@@ -394,23 +453,61 @@ EOF
 apt-get install iptables-persistent netfilter-persistent -y
 
 edit_iptables_node() {
-  PANEL_IP=$(dig +short $PANEL_DOMAIN | tail -n1)
-  iptables -A INPUT -s $PANEL_IP -p tcp -m tcp --dport 62001 -j ACCEPT
-  iptables -A INPUT -s $PANEL_IP -p tcp -m tcp --dport 62002 -j ACCEPT
+  local panel_ips ip
+  panel_ips=$(dig +short A "$PANEL_DOMAIN" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)
+  if [ -z "$panel_ips" ]; then
+    echo "ERROR: could not resolve an A record for panel domain $PANEL_DOMAIN" >&2
+    exit 1
+  fi
+  while IFS= read -r ip; do
+    [ -n "$ip" ] || continue
+    iptables -A INPUT -s "$ip" -p tcp -m tcp --dport 62001 -j ACCEPT
+    iptables -A INPUT -s "$ip" -p tcp -m tcp --dport 62002 -j ACCEPT
+  done <<< "$panel_ips"
   iptables -A INPUT -p tcp -m tcp --dport 62001 -j REJECT --reject-with tcp-reset
   iptables -A INPUT -p tcp -m tcp --dport 62002 -j REJECT --reject-with tcp-reset
+
+  if [ -e /proc/net/if_inet6 ] && command -v ip6tables >/dev/null 2>&1; then
+    local panel_ips6
+    panel_ips6=$(dig +short AAAA "$PANEL_DOMAIN" | grep -E ':' || true)
+    while IFS= read -r ip; do
+      [ -n "$ip" ] || continue
+      ip6tables -A INPUT -s "$ip" -p tcp -m tcp --dport 62001 -j ACCEPT
+      ip6tables -A INPUT -s "$ip" -p tcp -m tcp --dport 62002 -j ACCEPT
+    done <<< "$panel_ips6"
+    ip6tables -A INPUT -p tcp -m tcp --dport 62001 -j REJECT --reject-with tcp-reset
+    ip6tables -A INPUT -p tcp -m tcp --dport 62002 -j REJECT --reject-with tcp-reset
+  fi
 }
 
 # Configure iptables
 edit_iptables() {
   iptables -A INPUT -p icmp -j ACCEPT
   iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
-  iptables -A INPUT -p tcp -m state --state NEW -m tcp --dport $SSH_PORT -j ACCEPT
+  # Rate-limit new SSH connections: max 5 per 60s per source IP (brute-force guard).
+  iptables -A INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --set --name SSH
+  iptables -A INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --update --seconds 60 --hitcount 5 --name SSH -j DROP
+  iptables -A INPUT -p tcp -m state --state NEW -m tcp --dport "$SSH_PORT" -j ACCEPT
   iptables -A INPUT -p tcp -m tcp --dport 80 -j ACCEPT
   iptables -A INPUT -p tcp -m tcp --dport 443 -j ACCEPT
   iptables -A INPUT -i lo -j ACCEPT
   iptables -A OUTPUT -o lo -j ACCEPT
   iptables -P INPUT DROP
+
+  # Mirror the same policy on IPv6 (Angie also listens on [::]:80); otherwise
+  # IPv6 INPUT stays wide open. ICMPv6 must be allowed for NDP/PMTUD to work.
+  if [ -e /proc/net/if_inet6 ] && command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -A INPUT -p ipv6-icmp -j ACCEPT
+    ip6tables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+    ip6tables -A INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --set --name SSH6
+    ip6tables -A INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --update --seconds 60 --hitcount 5 --name SSH6 -j DROP
+    ip6tables -A INPUT -p tcp -m state --state NEW -m tcp --dport "$SSH_PORT" -j ACCEPT
+    ip6tables -A INPUT -p tcp -m tcp --dport 80 -j ACCEPT
+    ip6tables -A INPUT -p tcp -m tcp --dport 443 -j ACCEPT
+    ip6tables -A INPUT -i lo -j ACCEPT
+    ip6tables -A OUTPUT -o lo -j ACCEPT
+    ip6tables -P INPUT DROP
+  fi
 }
 if [[ "$INSTALL_MODE" == "node" ]]; then
   edit_iptables_node
@@ -418,8 +515,8 @@ fi
 if [[ ${configure_ssh_input,,} == "y" ]]; then
   echo "New user for ssh: $SSH_USER, password for user: $SSH_USER_PASS. New port for SSH: $SSH_PORT."
   add_user
-  sshd_edit
   edit_iptables
+  sshd_edit
 fi
 netfilter-persistent save
 
@@ -429,31 +526,29 @@ warp_install() {
   echo "If this fails then warp won't be added to routing and everything will work without it"
   curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
   echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
-  apt update 
+  apt update
   apt install cloudflare-warp -y
-  
-  echo "y" | warp-cli registration new
-  export TRY_WARP=$(echo $?)
-  if [[ $TRY_WARP != 0 ]]; then
-    echo "Couldn't connect to WARP"
-    exit 0
-  else
-    warp-cli mode proxy
-    warp-cli proxy port 40000
-    warp-cli connect
-    if [[ "${marzban_input,,}" == "y" ]]; then
-      export XRAY_CONFIG_WARP="/opt/xray-vps-setup/marzban/xray_config.json"
-    else
-      export XRAY_CONFIG_WARP="/opt/xray-vps-setup/xray/config.json"
-    fi
-    yq eval \
-    '.outbounds += {"tag": "warp","protocol": "socks","settings": {"servers": [{"address": "127.0.0.1","port": 40000}]}}' \
-    -i $XRAY_CONFIG_WARP
-    yq eval \
-    '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}' \
-    -i $XRAY_CONFIG_WARP
-    docker compose -f /opt/xray-vps-setup/docker-compose.yml down && docker compose -f /opt/xray-vps-setup/docker-compose.yml up -d
+
+  # If registration fails, skip WARP but let the rest of the setup finish
+  # (return, NOT exit, so docker compose still starts and the final output prints).
+  if ! echo "y" | warp-cli registration new; then
+    echo "Couldn't connect to WARP, continuing without it"
+    return 0
   fi
+  warp-cli mode proxy
+  warp-cli proxy port 40000
+  warp-cli connect
+  if [[ "${marzban_input,,}" == "y" ]]; then
+    export XRAY_CONFIG_WARP="/opt/xray-vps-setup/marzban/xray_config.json"
+  else
+    export XRAY_CONFIG_WARP="/opt/xray-vps-setup/xray/config.json"
+  fi
+  yq eval \
+  '.outbounds += {"tag": "warp","protocol": "socks","settings": {"servers": [{"address": "127.0.0.1","port": 40000}]}}' \
+  -i "$XRAY_CONFIG_WARP"
+  yq eval \
+  '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}' \
+  -i "$XRAY_CONFIG_WARP"
 }
 
 end_script() {
@@ -468,20 +563,38 @@ end_script() {
   docker compose -f /opt/xray-vps-setup/docker-compose.yml up -d
 
   if [[ "$INSTALL_MODE" == "marzban" ]]; then
+    # Configure marzban over its local port — no public cert/DNS needed yet,
+    # which avoids the ACME race entirely.
+    MARZBAN_API="http://127.0.0.1:8000"
     echo "Waiting for marzban to start..."
-    sleep 5
-    docker exec marzban marzban-cli admin import-from-env \
-      || echo "Warning: admin import failed - run 'docker exec marzban marzban-cli admin import-from-env' manually"
+    # Retry the admin import: the container needs a moment to initialise its DB.
+    for attempt in $(seq 1 12); do
+      if docker exec marzban marzban-cli admin import-from-env 2>/dev/null; then
+        break
+      fi
+      if [[ "$attempt" -eq 12 ]]; then
+        echo "Warning: admin import failed - run 'docker exec marzban marzban-cli admin import-from-env' manually"
+      fi
+      sleep 5
+    done
 
     echo "Updating panel default host with domain $VLESS_DOMAIN..."
-    PANEL_TOKEN=$(curl -sf -X POST "https://$VLESS_DOMAIN/api/admin/token" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      --data-urlencode "username=$MARZBAN_USER" \
-      --data-urlencode "password=$MARZBAN_PASS" \
-      | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])" || echo "")
+    # Retry while marzban finishes starting (local API, no certificate dependency).
+    PANEL_TOKEN=""
+    for attempt in $(seq 1 30); do
+      PANEL_TOKEN=$(curl -sf -X POST "$MARZBAN_API/api/admin/token" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        --data-urlencode "username=$MARZBAN_USER" \
+        --data-urlencode "password=$MARZBAN_PASS" \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])" 2>/dev/null || echo "")
+      if [[ -n "$PANEL_TOKEN" && "$PANEL_TOKEN" != "null" ]]; then
+        break
+      fi
+      sleep 2
+    done
     if [[ -n "$PANEL_TOKEN" && "$PANEL_TOKEN" != "null" ]]; then
       PHOSTS_HTTP=$(curl -s -o /tmp/panel_hosts.json -w "%{http_code}" \
-        "https://$VLESS_DOMAIN/api/hosts" \
+        "$MARZBAN_API/api/hosts" \
         -H "Authorization: Bearer $PANEL_TOKEN" || echo "000")
       if [[ "$PHOSTS_HTTP" == "200" ]]; then
         export PANEL_HOST_DOMAIN="$VLESS_DOMAIN"
@@ -497,7 +610,7 @@ for host_list in hosts.values():
 print(json.dumps(hosts))
 PYEOF
         curl -s -o /dev/null \
-          -X PUT "https://$VLESS_DOMAIN/api/hosts" \
+          -X PUT "$MARZBAN_API/api/hosts" \
           -H "Authorization: Bearer $PANEL_TOKEN" \
           -H "Content-Type: application/json" \
           -d @/tmp/panel_hosts_updated.json || true
@@ -523,11 +636,11 @@ User: $MARZBAN_USER
 Password: $MARZBAN_PASS
     "
   else
-    xray_config=$(wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/xray_outbound" | envsubst)
-    singbox_config=$(wget -qO- "https://raw.githubusercontent.com/$GIT_REPO/refs/heads/$GIT_BRANCH/templates_for_script/sing_box_outbound" | envsubst)
+    xray_config=$(fetch "$RAW/xray_outbound" '$VLESS_DOMAIN $XRAY_UUID $XRAY_PBK $XRAY_SID')
+    singbox_config=$(fetch "$RAW/sing_box_outbound" '$VLESS_DOMAIN $XRAY_UUID $XRAY_PBK $XRAY_SID')
 
     final_msg="Clipboard string format:
-vless://$XRAY_UUID@$VLESS_DOMAIN:443?type=tcp&security=reality&pbk=$XRAY_PBK&fp=chrome&sni=$VLESS_DOMAIN&sid=&spx=%2F&flow=xtls-rprx-vision#Script
+vless://$XRAY_UUID@$VLESS_DOMAIN:443?type=tcp&security=reality&pbk=$XRAY_PBK&fp=firefox&sni=$VLESS_DOMAIN&sid=$XRAY_SID&spx=%2F&flow=xtls-rprx-vision#Script
 
 XRay outbound config:
 $xray_config
@@ -548,4 +661,3 @@ PBK: $XRAY_PBK, UUID: $XRAY_UUID
 }
 
 end_script
-set +e
