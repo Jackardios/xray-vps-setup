@@ -1,0 +1,74 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "port": $CLIENT_SOCKS_PORT,
+      "protocol": "socks",
+      "settings": {
+        "auth": "password",
+        "udp": false,
+        "accounts": [
+          {
+            "user": "$CLIENT_SOCKS_USER",
+            "pass": "$CLIENT_SOCKS_PASS"
+          }
+        ]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "default",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "$VLESS_DOMAIN",
+            "port": 443,
+            "users": [
+              {
+                "id": "$XRAY_UUID",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "$VLESS_DOMAIN",
+          "fingerprint": "firefox",
+          "publicKey": "$XRAY_PBK",
+          "shortId": "$XRAY_SID",
+          "spiderX": "/"
+        }
+      }
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "ip": [
+          "geoip:private"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "protocol": "bittorrent",
+        "outboundTag": "block"
+      }
+    ]
+  }
+}

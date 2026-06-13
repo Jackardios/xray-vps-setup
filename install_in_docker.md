@@ -253,6 +253,9 @@ http {
         resolver_timeout           2s;
 
         location ~* /($MARZBAN_PATH|statics|$MARZBAN_SUB_PATH|api|docs|redoc|openapi.json) {
+            # (опционально) отказать клиенту Happ: он отдаёт xray API на localhost
+            # без пароля, один скомпрометированный юзер = дамп/правка конфигов.
+            if ($http_user_agent ~* "Happ") { return 403; }
             proxy_pass http://127.0.0.1:8000;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -414,6 +417,10 @@ wget -qO- https://raw.githubusercontent.com/Jackardios/xray-vps-setup/refs/heads
   "routing": {
     "rules": [
       {
+        "ip": ["geoip:private"],
+        "outboundTag": "block"
+      },
+      {
         "protocol": "bittorrent",
         "outboundTag": "block"
       }
@@ -472,11 +479,11 @@ warp-cli connect
 wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && chmod +x /usr/bin/yq
 ```
 
-Далее с помощью `yq` мы установим в уже существующий кофниг WARP:
+Далее с помощью `yq` мы установим в уже существующий кофниг WARP. В список доменов, помимо ру-сайтов, добавлены известные сервисы определения IP (`api.ipify.org`, `ifconfig.me`, `ipinfo.io`, `ip-api.com`, `ip.sb` и т.д.): так типовой зонд из соседнего приложения, нашедшего локальный SOCKS-прокси, увидит IP Cloudflare, а не вашего сервера (подробнее — в разделе «Защита клиента от localhost-утечки»).
 
 ```bash
 yq eval '.outbounds += {"tag": "warp","protocol": "socks","settings": {"servers": [{"address": "127.0.0.1","port": 40000}]}}' -i $XRAY_CONFIG_WARP
-yq eval '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}' -i $XRAY_CONFIG_WARP
+yq eval '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$", "domain:api.ipify.org", "domain:api4.ipify.org", "domain:api6.ipify.org", "domain:api64.ipify.org", "domain:checkip.amazonaws.com", "domain:ifconfig.me", "domain:ifconfig.co", "domain:icanhazip.com", "domain:ident.me", "domain:ipinfo.io", "domain:api.myip.com", "domain:ip.seeip.org", "domain:ipecho.net", "domain:wgetip.com", "domain:ip-api.com", "domain:ip.sb", "domain:api.ip.sb", "domain:whatismyip.akamai.com", "domain:yandex.net", "domain:avito.st"]}' -i $XRAY_CONFIG_WARP
 
 ```
 
@@ -484,6 +491,121 @@ yq eval '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-
 
 ```bash
 docker compose -f /opt/xray-vps-setup/docker-compose.yml down && docker compose -f /opt/xray-vps-setup/docker-compose.yml up -d
+```
+
+## Split-IP: разделение входного и выходного IP
+
+Если входной IP (на котором слушает Reality) совпадает с выходным, то утёкший выходной IP — это и есть точка входа. РКН коррелирует его с netflow провайдера (`два IP в одно время от одного NAT → один из них туннель`) и блокирует сервер. Полное решение — принимать Reality на одном (скрытом, ingress) IP, а выпускать трафик через другой (видимый, egress). Нужен **второй IPv4**, уже привязанный провайдером к серверу.
+
+**1. Сеть.** egress-адрес должен быть системным дефолтом — в `systemd-networkd` он идёт **первым**:
+
+```ini
+[Match]
+Name=eth0
+
+[Network]
+Address=EGRESS_IP/24   # первым → системный дефолт (исходящие сервера идут отсюда)
+Address=INGRESS_IP/24
+Gateway=EGRESS_GW
+```
+
+A-запись домена должна указывать на **ingress IP**; AAAA-запись лучше убрать (split — только IPv4).
+
+**2. xray.** В инбаунде вместо `"listen": "0.0.0.0"` укажите ingress, а `direct`-аутбаунду добавьте `sendThrough` с egress:
+
+```json
+"inbounds": [
+  { "listen": "INGRESS_IP", "port": 443, "...": "..." }
+],
+"outbounds": [
+  {
+    "protocol": "freedom",
+    "tag": "direct",
+    "sendThrough": "EGRESS_IP",
+    "settings": { "domainStrategy": "UseIPv4" }
+  },
+  { "protocol": "blackhole", "tag": "block" }
+]
+```
+
+WARP-аутбаунд (socks на `127.0.0.1`) трогать не нужно — он и так выходит через Cloudflare; `sendThrough` важен только для `direct`.
+
+**3. iptables.** На ingress открыты только 80/443, SSH — только на egress (так ingress отвечает лишь Reality+ACME и не светит SSH):
+
+```bash
+iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -A INPUT -p tcp -d EGRESS_IP  -m tcp --dport 22  -j ACCEPT
+iptables -A INPUT -p tcp -d INGRESS_IP -m tcp --dport 80  -j ACCEPT
+iptables -A INPUT -p tcp -d INGRESS_IP -m tcp --dport 443 -j ACCEPT
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -P INPUT DROP
+iptables-save > /etc/network/iptables.rules
+```
+
+После этого ходите по SSH **через egress IP**. Берите ingress и egress из **разных** подсетей — иначе бан подсети заберёт оба.
+
+## Защита клиента от localhost-утечки
+
+VPN-клиенты (v2rayNG, Hiddify, NekoBox и т.п.) поднимают на устройстве **локальный SOCKS-прокси без пароля** (обычно `127.0.0.1:10808`). Любое приложение-сосед (Яндекс, WB, Ozon, MAX, гос.приложения) может за секунды найти его, подключиться без авторизации, прогнать через него трафик и **узнать выходной IP сервера** → IP уходит в РКН → блок. Что делать:
+
+- Включите на локальном SOCKS **авторизацию** (логин+пароль) и `udp:false`.
+- Клиенты с поддержкой auth: **Husi**, SFA, saeeddev94/xray; Clash/mihomo в режиме TUN-only безопасен по умолчанию. **Не используйте Happ** (отдаёт xray API на localhost без пароля). sing-box — только **≥ 1.4.5** (CVE-2023-43644).
+- Проверить устройство: [per-app-split-bypass-poc](https://github.com/runetfreedom/per-app-split-bypass-poc) — при включённой auth должно показать «VPN not found».
+
+Готовый «hardened» клиентский конфиг xray (SOCKS с паролем + блок приватных IP/торрентов). Сгенерируйте свои `user`/`pass` (`tr -dc A-Za-z0-9 </dev/urandom | head -c 16; echo`) и подставьте `VLESS_DOMAIN`/`XRAY_UUID`/`XRAY_PBK`/`XRAY_SID`:
+
+```json
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "auth": "password",
+        "udp": false,
+        "accounts": [ { "user": "СВОЙ_ЛОГИН", "pass": "СВОЙ_ПАРОЛЬ" } ]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "default",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "VLESS_DOMAIN",
+            "port": 443,
+            "users": [ { "id": "XRAY_UUID", "encryption": "none", "flow": "xtls-rprx-vision" } ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "VLESS_DOMAIN",
+          "fingerprint": "firefox",
+          "publicKey": "XRAY_PBK",
+          "shortId": "XRAY_SID",
+          "spiderX": "/"
+        }
+      }
+    },
+    { "protocol": "blackhole", "tag": "block" }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      { "ip": ["geoip:private"], "outboundTag": "block" },
+      { "protocol": "bittorrent", "outboundTag": "block" }
+    ]
+  }
+}
 ```
 
 ## Заметки по обходу DPI

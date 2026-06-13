@@ -152,7 +152,52 @@ read -ep "Enter your domain:"$'\n' input_domain
 
 export VLESS_DOMAIN=$(echo "$input_domain" | idn)
 
+# Split-IP mode: receive Reality on a hidden ingress IP and exit through a
+# different (visible) IP, so a leaked exit IP can never equal the Reality entry
+# IP (defeats the ingress==egress correlation attack). Needs a 2nd IPv4 already
+# attached to this host by the provider. Default: no split (listen 0.0.0.0).
+export LISTEN_ADDR="0.0.0.0"
+split_ip_input="n"
+if [[ "$INSTALL_MODE" != "node" ]]; then
+  read -ep "Split-IP mode? Receive Reality on a hidden ingress IP and exit via a different IP (needs a 2nd IPv4 already attached to this server). [y/N] "$'\n' split_ip_input
+  if [[ ${split_ip_input,,} == "y" ]]; then
+    read -ep "Ingress IP (clients connect here; your domain's A record must point to it):"$'\n' INGRESS_IP
+    read -ep "Egress IP (traffic exits here; this is the IP destinations/spyware will see):"$'\n' EGRESS_IP
+    export INGRESS_IP EGRESS_IP
+    # Validate format (also rejects an empty answer — an empty grep pattern would
+    # otherwise match anything) AND that each IP is already on an interface, else
+    # listen/sendThrough/firewall below would silently break connectivity.
+    for _ip in "$INGRESS_IP" "$EGRESS_IP"; do
+      if ! [[ "$_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        echo "ERROR: '$_ip' is not a valid IPv4 address." >&2
+        exit 1
+      fi
+      if ! ip -4 addr show | grep -qwF "$_ip"; then
+        echo "ERROR: $_ip is not present on any interface. Attach it via your provider first." >&2
+        exit 1
+      fi
+    done
+    if [ "$INGRESS_IP" = "$EGRESS_IP" ]; then
+      echo "ERROR: ingress and egress IP must differ for split-IP mode." >&2
+      exit 1
+    fi
+    # A single subnet ban could take both if they share a /24.
+    if [ "${INGRESS_IP%.*}" = "${EGRESS_IP%.*}" ]; then
+      echo "WARNING: ingress and egress look like the same /24 — a subnet ban could take both."
+    fi
+    export LISTEN_ADDR="$INGRESS_IP"
+  fi
+fi
+
 SERVER_IPS=($(hostname -I))
+
+# When splitting IPs the domain must point specifically at the ingress IP (that is
+# where clients and ACME connect); otherwise any of this host's IPs is acceptable.
+if [[ ${split_ip_input,,} == "y" ]]; then
+  EXPECTED_IPS=("$INGRESS_IP")
+else
+  EXPECTED_IPS=("${SERVER_IPS[@]}")
+fi
 
 # Collect every A record, not just the last one (domains may have several).
 RESOLVED_IPS=$(dig +short A "$VLESS_DOMAIN" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)
@@ -169,7 +214,7 @@ if [ -z "$RESOLVED_IPS" ]; then
 else
   MATCH_FOUND=false
   for resolved_ip in $RESOLVED_IPS; do
-    for server_ip in "${SERVER_IPS[@]}"; do
+    for server_ip in "${EXPECTED_IPS[@]}"; do
       if [ "$resolved_ip" == "$server_ip" ]; then
         MATCH_FOUND=true
         break 2
@@ -182,7 +227,7 @@ else
   else
     echo "Warning: DNS record exists but points to different IP"
     echo "  Domain resolves to: $(echo $RESOLVED_IPS | tr '\n' ' ')"
-    echo "  This server's IPs: ${SERVER_IPS[*]}"
+    echo "  Expected IP(s): ${EXPECTED_IPS[*]}"
     read -ep "Continue anyway? [y/N]"$'\n' prompt_response
     if [[ "$prompt_response" =~ ^([yY])$ ]]; then
       echo "Ok, proceeding"
@@ -211,6 +256,14 @@ if [[ "$INSTALL_MODE" == "marzban" ]]; then
   marzban_input="y"
 else
   marzban_input="n"
+fi
+
+# Happ exposes an unauthenticated xray API on the client's localhost, so a single
+# compromised user can dump/alter configs. Optionally refuse it at the subscription
+# endpoint. Soft/spoofable nudge (Happ is popular) — default off.
+block_happ_input="n"
+if [[ "$INSTALL_MODE" == "marzban" ]]; then
+  read -ep "Block the Happ client from fetching subscriptions (it exposes an unauthenticated localhost API)? [y/N] "$'\n' block_happ_input
 fi
 
 read -ep "Do you want to create a user to connect to server as non-root and forbid root access? Do this on first run only. [y/N] "$'\n' configure_ssh_input
@@ -307,15 +360,29 @@ xray_setup() {
     export MARZBAN_PATH=$(openssl rand -hex 8)
     export MARZBAN_SUB_PATH=$(openssl rand -hex 8)
     download_xray_core /opt/xray-vps-setup/xray-core
+    # Optional Happ User-Agent 403 in the subscription location (empty = no-op line).
+    if [[ ${block_happ_input,,} == "y" ]]; then
+      export HAPP_BLOCK='if ($http_user_agent ~* "Happ") { return 403; }'
+    else
+      export HAPP_BLOCK=''
+    fi
     fetch "$RAW/compose-marzban" '' > ./docker-compose.yml
     fetch "$RAW/marzban" '$MARZBAN_USER $MARZBAN_PASS $MARZBAN_PATH $MARZBAN_SUB_PATH $VLESS_DOMAIN' > ./marzban/.env
-    fetch "$RAW/angie-marzban" '$VLESS_DOMAIN $MARZBAN_PATH $MARZBAN_SUB_PATH' > ./angie.conf
-    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID $XRAY_SID2 $XRAY_SID3' > ./marzban/xray_config.json
+    fetch "$RAW/angie-marzban" '$VLESS_DOMAIN $MARZBAN_PATH $MARZBAN_SUB_PATH $HAPP_BLOCK' > ./angie.conf
+    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID $XRAY_SID2 $XRAY_SID3 $LISTEN_ADDR' > ./marzban/xray_config.json
   else
     mkdir -p /opt/xray-vps-setup/xray
     fetch "$RAW/compose-xray" '$XRAY_VERSION' > ./docker-compose.yml
-    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID $XRAY_SID2 $XRAY_SID3' > ./xray/config.json
+    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_SID $XRAY_SID2 $XRAY_SID3 $LISTEN_ADDR' > ./xray/config.json
     fetch "$RAW/angie" '$VLESS_DOMAIN' > ./angie.conf
+  fi
+
+  # Split-IP: bind the visible egress IP on the direct outbound so tunnelled
+  # traffic exits there, not on the hidden ingress IP the inbound listens on.
+  # (yq infers JSON from the .json extension, as the WARP edits below do.)
+  if [[ ${split_ip_input,,} == "y" ]]; then
+    if [[ "${marzban_input,,}" == "y" ]]; then _cfg=./marzban/xray_config.json; else _cfg=./xray/config.json; fi
+    yq eval '(.outbounds[] | select(.tag=="direct")).sendThrough = strenv(EGRESS_IP)' -i "$_cfg"
   fi
 }
 
@@ -559,14 +626,22 @@ edit_iptables_node() {
 
 # Configure iptables
 edit_iptables() {
+  # Split-IP: pin 80/443 to the ingress IP and SSH to the egress IP, so the hidden
+  # ingress IP only ever answers Reality (443) + ACME (80) and never exposes SSH.
+  # Empty in non-split mode → rules apply to all destinations as before. Left
+  # UNQUOTED on purpose so an empty value adds no argument.
+  local INGRESS_MATCH="" EGRESS_MATCH=""
+  if [[ ${split_ip_input,,} == "y" ]]; then
+    INGRESS_MATCH="-d $INGRESS_IP"; EGRESS_MATCH="-d $EGRESS_IP"
+  fi
   iptables -A INPUT -p icmp -j ACCEPT
   iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
   # Rate-limit new SSH connections: max 5 per 60s per source IP (brute-force guard).
-  iptables -A INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --set --name SSH
-  iptables -A INPUT -p tcp --dport "$SSH_PORT" -m state --state NEW -m recent --update --seconds 60 --hitcount 5 --name SSH -j DROP
-  iptables -A INPUT -p tcp -m state --state NEW -m tcp --dport "$SSH_PORT" -j ACCEPT
-  iptables -A INPUT -p tcp -m tcp --dport 80 -j ACCEPT
-  iptables -A INPUT -p tcp -m tcp --dport 443 -j ACCEPT
+  iptables -A INPUT -p tcp $EGRESS_MATCH --dport "$SSH_PORT" -m state --state NEW -m recent --set --name SSH
+  iptables -A INPUT -p tcp $EGRESS_MATCH --dport "$SSH_PORT" -m state --state NEW -m recent --update --seconds 60 --hitcount 5 --name SSH -j DROP
+  iptables -A INPUT -p tcp $EGRESS_MATCH -m state --state NEW -m tcp --dport "$SSH_PORT" -j ACCEPT
+  iptables -A INPUT -p tcp $INGRESS_MATCH -m tcp --dport 80 -j ACCEPT
+  iptables -A INPUT -p tcp $INGRESS_MATCH -m tcp --dport 443 -j ACCEPT
   iptables -A INPUT -i lo -j ACCEPT
   iptables -A OUTPUT -o lo -j ACCEPT
   iptables -P INPUT DROP
@@ -594,6 +669,11 @@ if [[ ${configure_ssh_input,,} == "y" ]]; then
   add_user
   edit_iptables
   sshd_edit
+elif [[ ${split_ip_input,,} == "y" ]]; then
+  echo "WARNING: split-IP mode was selected but SSH hardening was declined, so the"
+  echo "per-IP firewall was NOT applied. The ingress IP may still expose SSH and"
+  echo "there is no INPUT lockdown. Re-run with SSH hardening enabled, or apply the"
+  echo "ingress/egress iptables rules manually."
 fi
 netfilter-persistent save
 
@@ -623,8 +703,14 @@ warp_install() {
   yq eval \
   '.outbounds += {"tag": "warp","protocol": "socks","settings": {"servers": [{"address": "127.0.0.1","port": 40000}]}}' \
   -i "$XRAY_CONFIG_WARP"
+  # Route RU sites through WARP, AND the well-known IP-echo / "what's my IP"
+  # endpoints: a co-resident app abusing an unauthenticated localhost SOCKS proxy
+  # on the client discovers the exit IP via these services — sending them through
+  # WARP makes that probe see a Cloudflare IP, not this server's. Cheap (only these
+  # lookups + RU traffic divert); a custom IP-echo host bypasses it (split-IP is the
+  # complete fix). Matching works on the sniffed SNI/Host (inbound sniffing is on).
   yq eval \
-  '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$"]}' \
+  '.routing.rules += {"outboundTag": "warp", "domain": ["geosite:category-ru", "regexp:.*\\.xn--[a-z0-9]+$", "regexp:.*\\.ru$", "regexp:.*\\.su$", "domain:api.ipify.org", "domain:api4.ipify.org", "domain:api6.ipify.org", "domain:api64.ipify.org", "domain:checkip.amazonaws.com", "domain:ifconfig.me", "domain:ifconfig.co", "domain:icanhazip.com", "domain:ident.me", "domain:ipinfo.io", "domain:api.myip.com", "domain:ip.seeip.org", "domain:ipecho.net", "domain:wgetip.com", "domain:ip-api.com", "domain:ip.sb", "domain:api.ip.sb", "domain:whatismyip.akamai.com", "domain:yandex.net", "domain:avito.st"]}' \
   -i "$XRAY_CONFIG_WARP"
 }
 
@@ -713,8 +799,13 @@ User: $MARZBAN_USER
 Password: $MARZBAN_PASS
     "
   else
+    # Random per-install credentials for the hardened client's localhost SOCKS proxy.
+    export CLIENT_SOCKS_PORT=10808
+    export CLIENT_SOCKS_USER=$(tr -dc a-z0-9 </dev/urandom | head -c 8)
+    export CLIENT_SOCKS_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 16)
     xray_config=$(fetch "$RAW/xray_outbound" '$VLESS_DOMAIN $XRAY_UUID $XRAY_PBK $XRAY_SID')
     singbox_config=$(fetch "$RAW/sing_box_outbound" '$VLESS_DOMAIN $XRAY_UUID $XRAY_PBK $XRAY_SID')
+    xray_full=$(fetch "$RAW/xray_full_client" '$VLESS_DOMAIN $XRAY_UUID $XRAY_PBK $XRAY_SID $CLIENT_SOCKS_PORT $CLIENT_SOCKS_USER $CLIENT_SOCKS_PASS')
 
     final_msg="Clipboard string format:
 vless://$XRAY_UUID@$VLESS_DOMAIN:443?type=tcp&security=reality&pbk=$XRAY_PBK&fp=firefox&sni=$VLESS_DOMAIN&sid=$XRAY_SID&spx=%2F&flow=xtls-rprx-vision#Script
@@ -725,6 +816,12 @@ $xray_config
 Sing-box outbound config:
 $singbox_config
 
+Hardened full XRay client config (authenticated localhost SOCKS — point your apps at
+socks5://$CLIENT_SOCKS_USER:$CLIENT_SOCKS_PASS@127.0.0.1:$CLIENT_SOCKS_PORT ; UDP is off,
+set \"udp\": true only if you accept the leak risk). Protects against co-resident apps
+abusing an unauthenticated localhost proxy to discover the server IP:
+$xray_full
+
 Plain data:
 PBK: $XRAY_PBK, UUID: $XRAY_UUID
     "
@@ -734,6 +831,9 @@ PBK: $XRAY_PBK, UUID: $XRAY_UUID
   echo "$final_msg"
   if [[ ${configure_ssh_input,,} == "y" ]]; then
     echo "SSH user: $SSH_USER, SSH password: $SSH_USER_PASS, SSH port: $SSH_PORT"
+    if [[ ${split_ip_input,,} == "y" ]]; then
+      echo "NOTE: split-IP active — SSH is now reachable ONLY via the egress IP $EGRESS_IP (your current session stays up; reconnect there)."
+    fi
   fi
 }
 

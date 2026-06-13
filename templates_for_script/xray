@@ -5,7 +5,7 @@
   "inbounds": [
     {
       "tag": "VLESS TCP VISION REALITY",
-      "listen": "0.0.0.0",
+      "listen": "$LISTEN_ADDR",
       "port": 443,
       "protocol": "vless",
       "settings": {
