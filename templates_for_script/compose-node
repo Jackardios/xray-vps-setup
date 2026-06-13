@@ -24,6 +24,7 @@ services:
       - angie-data:/var/lib/angie
       - ./angie.conf:/etc/angie/angie.conf
       - ./index.html:/tmp/index.html
+      - ./www:/var/www
 
 volumes:
   angie-data:

@@ -8,6 +8,7 @@ services:
       - angie-data:/var/lib/angie
       - ./angie.conf:/etc/angie/angie.conf
       - ./index.html:/tmp/index.html
+      - ./www:/var/www
   xray:
     image: ghcr.io/xtls/xray-core:$XRAY_VERSION
     container_name: xray

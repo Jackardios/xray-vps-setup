@@ -85,10 +85,13 @@ check_hosting_asn() {
   fi
 }
 
-# Write a per-deploy-unique decoy page to ./index.html (the masking site angie
-# serves at /). Brand/tagline/nonce are randomised so every deployment differs
-# byte-for-byte, which defeats exact-hash fingerprinting of a shared decoy.
+# Write a per-deploy-unique decoy page to the given file (default ./index.html) —
+# the masking site angie serves at /. Brand/tagline/nonce are randomised on EVERY
+# call so each file differs byte-for-byte, which defeats exact-hash fingerprinting
+# of a shared decoy and lets separate domains in the SNI pool look like unrelated
+# sites (see write_extra_decoys).
 write_decoy() {
+  local out="${1:-./index.html}"
   export DECOY_BRAND=$(shuf -n1 -e Northwind Lumira Veltro Caldera Brixton Auralis Meridian Halcyon Everstone Tindle)
   export DECOY_TAGLINE=$(shuf -n1 -e "Authentication required" "Sign in to continue" "Please sign in to continue" "Enter your credentials to continue" "Sign in to your account")
   export DECOY_TITLE="Sign in · $DECOY_BRAND"
@@ -121,7 +124,8 @@ write_decoy() {
       export DECOY_ACCENT="#14b8a6"; export DECOY_ACCENT2="#0d9488"
       export DECOY_ACCENT_FG="#04201c"; export DECOY_INPUT_BG="#0b1220" ;;
   esac
-  fetch "$RAW/decoy" '$DECOY_BRAND $DECOY_TAGLINE $DECOY_TITLE $DECOY_NONCE $DECOY_YEAR $DECOY_BG $DECOY_PANEL $DECOY_BORDER $DECOY_FG $DECOY_MUTED $DECOY_ACCENT $DECOY_ACCENT2 $DECOY_ACCENT_FG $DECOY_INPUT_BG' > ./index.html
+  mkdir -p "$(dirname "$out")"
+  fetch "$RAW/decoy" '$DECOY_BRAND $DECOY_TAGLINE $DECOY_TITLE $DECOY_NONCE $DECOY_YEAR $DECOY_BG $DECOY_PANEL $DECOY_BORDER $DECOY_FG $DECOY_MUTED $DECOY_ACCENT $DECOY_ACCENT2 $DECOY_ACCENT_FG $DECOY_INPUT_BG' > "$out"
 }
 
 # Check if script started as root
@@ -199,44 +203,79 @@ else
   EXPECTED_IPS=("${SERVER_IPS[@]}")
 fi
 
-# Collect every A record, not just the last one (domains may have several).
-RESOLVED_IPS=$(dig +short A "$VLESS_DOMAIN" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)
-
-if [ -z "$RESOLVED_IPS" ]; then
-  echo "Warning: Domain has no DNS record"
-  read -ep "Are you sure? That domain has no DNS record. If you didn't add that you will have to restart xray and angie by yourself [y/N]"$'\n' prompt_response
+# Verify a hostname's A record(s) point at this server (EXPECTED_IPS). Advisory:
+# every A record is collected (domains may have several), and a missing/mismatched
+# record only warns and asks to continue rather than hard-failing, since DNS may
+# still be propagating. Used for the main domain AND every extra SNI name — each
+# must resolve here or its ACME HTTP-01 certificate won't be issued.
+verify_domain_dns() {
+  local host="$1"
+  local resolved
+  resolved=$(dig +short A "$host" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)
+  if [ -z "$resolved" ]; then
+    echo "Warning: '$host' has no DNS record"
+    read -ep "Are you sure? '$host' has no DNS record. Without it ACME can't issue its certificate and that SNI won't work [y/N]"$'\n' prompt_response
+    if [[ "$prompt_response" =~ ^([yY])$ ]]; then
+      echo "Ok, proceeding without DNS verification for '$host'"
+      return
+    fi
+    echo "Come back later"
+    exit 1
+  fi
+  local resolved_ip server_ip
+  for resolved_ip in $resolved; do
+    for server_ip in "${EXPECTED_IPS[@]}"; do
+      if [ "$resolved_ip" == "$server_ip" ]; then
+        echo "✓ DNS record for '$host' points to this server"
+        return
+      fi
+    done
+  done
+  echo "Warning: '$host' resolves but points to a different IP"
+  echo "  Resolves to: $(echo $resolved | tr '\n' ' ')"
+  echo "  Expected IP(s): ${EXPECTED_IPS[*]}"
+  read -ep "Continue anyway? [y/N]"$'\n' prompt_response
   if [[ "$prompt_response" =~ ^([yY])$ ]]; then
-    echo "Ok, proceeding without DNS verification"
+    echo "Ok, proceeding"
   else
     echo "Come back later"
     exit 1
   fi
-else
-  MATCH_FOUND=false
-  for resolved_ip in $RESOLVED_IPS; do
-    for server_ip in "${EXPECTED_IPS[@]}"; do
-      if [ "$resolved_ip" == "$server_ip" ]; then
-        MATCH_FOUND=true
-        break 2
-      fi
-    done
-  done
+}
 
-  if [ "$MATCH_FOUND" = true ]; then
-    echo "✓ DNS record points to this server"
-  else
-    echo "Warning: DNS record exists but points to different IP"
-    echo "  Domain resolves to: $(echo $RESOLVED_IPS | tr '\n' ' ')"
-    echo "  Expected IP(s): ${EXPECTED_IPS[*]}"
-    read -ep "Continue anyway? [y/N]"$'\n' prompt_response
-    if [[ "$prompt_response" =~ ^([yY])$ ]]; then
-      echo "Ok, proceeding"
-    else
-      echo "Come back later"
-      exit 1
-    fi
+verify_domain_dns "$VLESS_DOMAIN"
+
+# Extra SNI names for traffic distribution (June-2026 DPI Signal-3 mitigation: the
+# block keys on parallel-connection rate PER SNI, so concentrating every client on
+# one name is what trips it). Each extra name becomes an additional Reality
+# serverName + Angie vhost + Marzban host, spreading connections across names.
+# Names may be subdomains of the main domain OR separate domains; each needs its own
+# A record pointing here. Empty input keeps the original single-SNI behaviour.
+VLESS_SNIS=("$VLESS_DOMAIN")
+echo
+echo "Optional: add extra SNI names to spread Reality traffic across several names."
+echo "Each may be a subdomain of $VLESS_DOMAIN or a separate domain, and must have an"
+echo "A record pointing to this server. Press Enter on an empty line to stop."
+for i in 1 2 3 4; do
+  read -ep "Extra SNI #$i (blank to skip):"$'\n' extra_sni_input
+  [ -z "$extra_sni_input" ] && break
+  extra_sni=$(echo "$extra_sni_input" | idn)
+  _dup=false
+  for _n in "${VLESS_SNIS[@]}"; do [ "$_n" == "$extra_sni" ] && _dup=true; done
+  if [ "$_dup" = true ]; then
+    echo "  '$extra_sni' already in the pool, skipping"
+    continue
   fi
-fi
+  verify_domain_dns "$extra_sni"
+  VLESS_SNIS+=("$extra_sni")
+done
+
+# Derived forms reused below: EXTRA = just the additional names (space separated,
+# for Angie server_name); ALL = every name comma separated, main domain first
+# (for the JSON/API steps). Empty EXTRA => single-SNI, fully backward compatible.
+VLESS_SNI_EXTRA="${VLESS_SNIS[*]:1}"
+VLESS_SNI_ALL=$(IFS=,; echo "${VLESS_SNIS[*]}")
+export VLESS_SNI_EXTRA VLESS_SNI_ALL
 
 # Advisory hosting/ASN check for every install mode (xray/marzban/node): all of
 # them terminate Reality on this host's subnet, so the warning is mode-agnostic.
@@ -347,6 +386,141 @@ if [[ "$INSTALL_MODE" != "node" ]]; then
   fi
 fi
 
+# Write a distinct decoy page for each SEPARATE domain in the SNI pool (a name that
+# is NOT a subdomain of the main domain). Subdomains reuse the main decoy (/tmp) —
+# natural for one site under several hostnames — while separate domains get their
+# own brand/palette/nonce so byte-identical pages can't re-link them by content hash.
+write_extra_decoys() {
+  local name
+  for name in ${VLESS_SNIS[@]:1}; do
+    case "$name" in
+      *".$VLESS_DOMAIN") : ;;                       # subdomain of main -> shares /tmp
+      *) write_decoy "./www/$name/index.html" ;;    # separate domain -> own decoy
+    esac
+  done
+}
+
+# Inject, per extra SNI name, an INDEPENDENT acme_client and a decoy-only vhost into
+# the already-rendered angie.conf. Per-name certs (not one shared SAN) because a SAN
+# cert would (a) bundle separate domains in a single CT-log entry, defeating their
+# unlinkability, and (b) be all-or-nothing if one name fails ACME. proxy_protocol is
+# a socket property already set by the main vhost, so new listen lines omit it
+# (repeating a socket option risks "duplicate listen options"). Subdomains of the
+# main domain reuse its decoy (/tmp); separate domains root at /var/www/<name>.
+inject_angie_extra_sni() {
+  local conf="$1"
+  python3 - "$conf" << 'PYEOF'
+import os, sys
+conf = sys.argv[1]
+main = os.environ['VLESS_DOMAIN']
+extra = os.environ['VLESS_SNI_EXTRA'].split()
+with open(conf) as f:
+    text = f.read()
+
+acme_lines = ''.join(
+    f"    acme_client vless_s{i} https://acme-v02.api.letsencrypt.org/directory;\n"
+    for i, _ in enumerate(extra, 1)
+)
+
+def block(i, name):
+    root = '/tmp' if name == main or name.endswith('.' + main) else f'/var/www/{name}'
+    return f"""
+    server {{
+        listen                     127.0.0.1:4123 ssl;
+        http2                      on;
+
+        set_real_ip_from           127.0.0.1;
+        real_ip_header             proxy_protocol;
+
+        server_name                {name};
+
+        acme vless_s{i};
+        ssl_certificate $acme_cert_vless_s{i};
+        ssl_certificate_key $acme_cert_key_vless_s{i};
+
+        ssl_protocols              TLSv1.2 TLSv1.3;
+        ssl_ciphers                TLS13_AES_128_GCM_SHA256:TLS13_AES_256_GCM_SHA384:TLS13_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305;
+        ssl_prefer_server_ciphers  on;
+
+        ssl_stapling               on;
+        ssl_stapling_verify        on;
+        resolver                   1.1.1.1 valid=60s;
+        resolver_timeout           2s;
+
+        location = /robots.txt {{
+            default_type text/plain;
+            return 200 "User-agent: *\\nDisallow:\\n";
+        }}
+
+        location = /favicon.ico {{
+            return 204;
+        }}
+
+        location / {{
+            root {root};
+            index index.html;
+            try_files $uri $uri/ =404;
+        }}
+
+        error_page 404 @notfound;
+        location @notfound {{
+            default_type text/html;
+            return 404 "<!doctype html><title>404 Not Found</title><h1>Not Found</h1>";
+        }}
+    }}
+"""
+
+server_blocks = ''.join(block(i, n) for i, n in enumerate(extra, 1))
+
+anchor = 'acme_client vless https://acme-v02.api.letsencrypt.org/directory;\n'
+idx = text.find(anchor)
+if idx == -1:
+    sys.stderr.write("inject_angie_extra_sni: acme_client anchor not found\n")
+    sys.exit(1)
+ins = idx + len(anchor)
+text = text[:ins] + acme_lines + text[ins:]
+
+close = text.rfind('}')        # final brace closes the http {} block
+if close == -1:
+    sys.stderr.write("inject_angie_extra_sni: closing brace not found\n")
+    sys.exit(1)
+text = text[:close] + server_blocks + text[close:]
+
+with open(conf, 'w') as f:
+    f.write(text)
+PYEOF
+}
+
+# Apply the multi-SNI pool to a freshly generated install: rewrite Reality
+# serverNames in the local xray config (node mode passes "" — the panel owns the
+# config and node_api_setup updates it via the API instead), inject the per-name
+# Angie acme_client/vhosts, and write per-domain decoys. No-op without extra names.
+apply_multi_sni() {
+  local xray_cfg="$1" angie_conf="$2"
+  [ -z "$VLESS_SNI_EXTRA" ] && return 0
+
+  if [ -n "$xray_cfg" ]; then
+    python3 - "$xray_cfg" << 'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+names = os.environ['VLESS_SNI_ALL'].split(',')
+with open(path) as f:
+    config = json.load(f)
+for inbound in config.get('inbounds', []):
+    reality = inbound.get('streamSettings', {}).get('realitySettings')
+    if isinstance(reality, dict) and 'serverNames' in reality:
+        reality['serverNames'] = names
+tmp = path + '.tmp'
+with open(tmp, 'w') as f:
+    json.dump(config, f, indent=2)
+os.replace(tmp, path)
+PYEOF
+  fi
+
+  inject_angie_extra_sni "$angie_conf"
+  write_extra_decoys
+}
+
 # Install marzban
 xray_setup() {
   mkdir -p /opt/xray-vps-setup
@@ -384,6 +558,12 @@ xray_setup() {
     if [[ "${marzban_input,,}" == "y" ]]; then _cfg=./marzban/xray_config.json; else _cfg=./xray/config.json; fi
     yq eval '(.outbounds[] | select(.tag=="direct")).sendThrough = strenv(EGRESS_IP)' -i "$_cfg"
   fi
+
+  if [[ "${marzban_input,,}" == "y" ]]; then
+    apply_multi_sni ./marzban/xray_config.json ./angie.conf
+  else
+    apply_multi_sni ./xray/config.json ./angie.conf
+  fi
 }
 
 node_setup() {
@@ -396,6 +576,9 @@ node_setup() {
   touch ./ssl_client_cert.pem
   fetch "$RAW/compose-node" '' > ./docker-compose.yml
   fetch "$RAW/angie" '$VLESS_DOMAIN' > ./angie.conf
+  # Node has no local xray config (the panel owns it); only inject Angie vhosts +
+  # per-domain decoys here. The panel's serverNames/hosts are updated in node_api_setup.
+  apply_multi_sni "" ./angie.conf
 }
 
 node_api_setup() {
@@ -468,12 +651,15 @@ node_api_setup() {
 import json, os
 with open('/tmp/xray_config.json') as f:
     config = json.load(f)
-node_domain = os.environ['NODE_DOMAIN']
+# Add this node's whole SNI pool (main domain + any extras) to every Reality inbound.
+names = os.environ['VLESS_SNI_ALL'].split(',')
 for inbound in config.get('inbounds', []):
     stream = inbound.get('streamSettings', {})
     reality = stream.get('realitySettings', {})
-    if 'serverNames' in reality and node_domain not in reality['serverNames']:
-        reality['serverNames'].append(node_domain)
+    if 'serverNames' in reality:
+        for name in names:
+            if name not in reality['serverNames']:
+                reality['serverNames'].append(name)
 print(json.dumps(config))
 PYEOF
   python3 /tmp/update_servernames.py > /tmp/xray_config_updated.json \
@@ -511,7 +697,9 @@ with open('/tmp/marzban_hosts.json') as f:
     hosts = json.load(f)
 with open('/tmp/marzban_inbounds.json') as f:
     inbounds = json.load(f)
-node_domain = os.environ['NODE_DOMAIN']
+# One host entry per SNI in the pool, so this node's subscription spreads clients
+# across all its names. A single name keeps the original (un-suffixed) remark.
+names = os.environ['VLESS_SNI_ALL'].split(',')
 node_name = os.environ['HOST_NODE_NAME']
 panel_user = os.environ['HOST_PANEL_USER']
 inbound_info = {}
@@ -524,27 +712,29 @@ for inbound_tag, host_list in hosts.items():
     info = inbound_info.get(inbound_tag, {})
     protocol = info.get('protocol', inbound_tag)
     transport = info.get('network', 'tcp')
-    remark = f'{node_name} ({panel_user}) [{protocol} - {transport}]'
-    if any(h.get('address') == node_domain and h.get('remark') == remark for h in host_list):
-        continue
-    host_list.append({
-        'remark': remark,
-        'address': node_domain,
-        'port': None,
-        'sni': node_domain,
-        'host': None,
-        'path': None,
-        'security': 'inbound_default',
-        'alpn': '',
-        'fingerprint': 'firefox',
-        'allowinsecure': None,
-        'is_disabled': None,
-        'mux_enable': None,
-        'fragment_setting': None,
-        'noise_setting': None,
-        'random_user_agent': None,
-        'use_sni_as_host': None,
-    })
+    base_remark = f'{node_name} ({panel_user}) [{protocol} - {transport}]'
+    for idx, name in enumerate(names, 1):
+        remark = base_remark if len(names) == 1 else f'{base_remark} #{idx}'
+        if any(h.get('sni') == name and h.get('remark') == remark for h in host_list):
+            continue
+        host_list.append({
+            'remark': remark,
+            'address': name,
+            'port': None,
+            'sni': name,
+            'host': None,
+            'path': None,
+            'security': 'inbound_default',
+            'alpn': '',
+            'fingerprint': 'firefox',
+            'allowinsecure': None,
+            'is_disabled': None,
+            'mux_enable': None,
+            'fragment_setting': None,
+            'noise_setting': None,
+            'random_user_agent': None,
+            'use_sni_as_host': None,
+        })
 print(json.dumps(hosts))
 PYEOF
   python3 /tmp/update_hosts.py > /tmp/marzban_hosts_updated.json \
@@ -760,16 +950,40 @@ end_script() {
         "$MARZBAN_API/api/hosts" \
         -H "Authorization: Bearer $PANEL_TOKEN" || echo "000")
       if [[ "$PHOSTS_HTTP" == "200" ]]; then
-        export PANEL_HOST_DOMAIN="$VLESS_DOMAIN"
         python3 << 'PYEOF' > /tmp/panel_hosts_updated.json
-import json, os
+import json, os, re
 with open('/tmp/panel_hosts.json') as f:
     hosts = json.load(f)
-domain = os.environ['PANEL_HOST_DOMAIN']
-for host_list in hosts.values():
-    for host in host_list:
-        host['address'] = domain
-        host['sni'] = domain
+names = os.environ['VLESS_SNI_ALL'].split(',')
+
+# Field template for a host built from scratch (when an inbound has no default host).
+TEMPLATE = {
+    'remark': '', 'address': '', 'port': None, 'sni': '', 'host': None, 'path': None,
+    'security': 'inbound_default', 'alpn': '', 'fingerprint': 'firefox',
+    'allowinsecure': None, 'is_disabled': None, 'mux_enable': None,
+    'fragment_setting': None, 'noise_setting': None, 'random_user_agent': None,
+    'use_sni_as_host': None,
+}
+
+for inbound_tag, host_list in hosts.items():
+    base = dict(host_list[0]) if host_list else dict(TEMPLATE, remark=inbound_tag)
+    if len(names) == 1:
+        # Single SNI: preserve original behaviour — point existing host(s) (or one
+        # default) at the domain, leave remark untouched.
+        if host_list:
+            for host in host_list:
+                host['address'] = host['sni'] = names[0]
+        else:
+            host_list.append(dict(base, address=names[0], sni=names[0]))
+        continue
+    # Multi-SNI: rebuild the inbound's host list to exactly one entry per name, so
+    # every user's subscription spreads across all SNIs. Strip any prior " #N" so
+    # re-runs stay deterministic instead of accreting suffixes.
+    base_remark = re.sub(r' #\d+$', '', base.get('remark') or inbound_tag)
+    hosts[inbound_tag] = [
+        dict(base, address=name, sni=name, remark=f'{base_remark} #{idx}')
+        for idx, name in enumerate(names, 1)
+    ]
 print(json.dumps(hosts))
 PYEOF
         curl -s -o /dev/null \
