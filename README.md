@@ -13,20 +13,6 @@ tmux
 bash <(wget -qO- https://raw.githubusercontent.com/Akiyamov/xray-vps-setup/refs/heads/main/vps-setup.sh)
 ```
 
-## Плейбук
-
-[Ansible-galaxy](https://galaxy.ansible.com/ui/standalone/roles/Akiyamov/xray-vps-setup/install/)
-```yaml
-- name: Setup vps 
-  hosts: some_host
-  roles:
-    - Akiyamov.xray-vps-setup  
-  vars:
-    domain: example.com # домен, уровень неважен
-    setup_variant: marzban # marzban or xray
-    setup_warp: false # true or false
-```
-
 ## Добавляем подписку и поддержку Mihomo
 
 ```

@@ -3,7 +3,7 @@
 set -e
 
 export GIT_BRANCH="main"
-export GIT_REPO="Akiyamov/xray-vps-setup"
+export GIT_REPO="Jackardios/xray-vps-setup"
 
 # Pinned xray-core version, used consistently for keygen, uuid, the downloaded
 # binary and the compose image so a deployment is reproducible.
