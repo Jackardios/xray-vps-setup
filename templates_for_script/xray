@@ -4,15 +4,59 @@
   },
   "inbounds": [
     {
-      "tag": "VLESS TCP VISION REALITY",
-      "listen": "$LISTEN_ADDR",
-      "port": 443,
+      "tag": "VLESS GRPC REALITY",
+      "listen": "127.0.0.1",
+      "port": 8443,
       "protocol": "vless",
       "settings": {
         "clients": [
           {
             "id": "$XRAY_UUID",
-            "email": "default",
+            "email": "grpc"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "grpc",
+        "security": "reality",
+        "realitySettings": {
+          "xver": 1,
+          "dest": "127.0.0.1:4123",
+          "serverNames": [
+            "$VLESS_DOMAIN"
+          ],
+          "publicKey": "$XRAY_PBK",
+          "privateKey": "$XRAY_PIK",
+          "shortIds": [
+            "$XRAY_SID",
+            "$XRAY_SID2",
+            "$XRAY_SID3"
+          ]
+        },
+        "grpcSettings": {
+          "serviceName": "$XRAY_SERVICE_NAME"
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ],
+        "routeOnly": true
+      }
+    },
+    {
+      "tag": "VLESS TCP VISION REALITY",
+      "listen": "127.0.0.1",
+      "port": 8444,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$XRAY_UUID",
+            "email": "vision",
             "flow": "xtls-rprx-vision"
           }
         ],

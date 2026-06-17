@@ -1,6 +1,6 @@
 services:
   angie:
-    image: docker.angie.software/angie:minimal
+    image: docker.angie.software/angie
     container_name: angie
     restart: always
     network_mode: host

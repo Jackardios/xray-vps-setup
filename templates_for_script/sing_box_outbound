@@ -3,7 +3,6 @@
     "server": "$VLESS_DOMAIN",
     "server_port": 443,
     "uuid": "$XRAY_UUID",
-    "flow": "xtls-rprx-vision",
     "tls": {
         "enabled": true,
         "insecure": false,
@@ -17,5 +16,9 @@
             "public_key": "$XRAY_PBK",
             "short_id": "$XRAY_SID"
         }
+    },
+    "transport": {
+        "type": "grpc",
+        "service_name": "$XRAY_SERVICE_NAME"
     }
 }

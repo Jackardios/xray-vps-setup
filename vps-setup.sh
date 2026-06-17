@@ -245,17 +245,24 @@ verify_domain_dns() {
 
 verify_domain_dns "$VLESS_DOMAIN"
 
-# Extra SNI names for traffic distribution (June-2026 DPI Signal-3 mitigation: the
-# block keys on parallel-connection rate PER SNI, so concentrating every client on
-# one name is what trips it). Each extra name becomes an additional Reality
-# serverName + Angie vhost + Marzban host, spreading connections across names.
-# Names may be subdomains of the main domain OR separate domains; each needs its own
-# A record pointing here. Empty input keeps the original single-SNI behaviour.
+# Transport layout (June-2026 DPI). gRPC is the PRIMARY transport: it multiplexes
+# every stream over one long-lived HTTP/2-over-TLS connection, so a client never
+# emits the burst of parallel TLS handshakes to one SNI that trips DPI Signal-3.
+# Vision (XTLS) stays available as a secondary transport. A single Reality inbound
+# cannot share 443/TCP with another, so Angie owns 443 with an ssl_preread SNI-router
+# that forwards each name to the matching LOCAL Reality inbound (gRPC 127.0.0.1:8443,
+# Vision 127.0.0.1:8444). Each SNI name is therefore bound to ONE transport: the main
+# domain is gRPC, and each extra name is asked per-name (gRPC default, or Vision).
+# Distributing names also spreads the per-SNI parallel-connection counter. Names may
+# be subdomains of the main domain OR separate domains; each needs its own A record.
 VLESS_SNIS=("$VLESS_DOMAIN")
+VLESS_SNIS_GRPC=("$VLESS_DOMAIN")
+VLESS_SNIS_VISION=()
 echo
-echo "Optional: add extra SNI names to spread Reality traffic across several names."
-echo "Each may be a subdomain of $VLESS_DOMAIN or a separate domain, and must have an"
-echo "A record pointing to this server. Press Enter on an empty line to stop."
+echo "Optional: add extra SNI names to spread traffic across several names."
+echo "Each may be a subdomain of $VLESS_DOMAIN or a separate domain, must have an"
+echo "A record pointing here, and is bound to ONE transport (gRPC default, or Vision)."
+echo "Press Enter on an empty name to stop."
 for i in 1 2 3 4; do
   read -ep "Extra SNI #$i (blank to skip):"$'\n' extra_sni_input
   [ -z "$extra_sni_input" ] && break
@@ -267,15 +274,26 @@ for i in 1 2 3 4; do
     continue
   fi
   verify_domain_dns "$extra_sni"
+  read -ep "  Transport for '$extra_sni' — [g]RPC (default) or [v]ision?"$'\n' _tr
   VLESS_SNIS+=("$extra_sni")
+  if [[ ${_tr,,} == "v" ]]; then
+    VLESS_SNIS_VISION+=("$extra_sni")
+    echo "  '$extra_sni' -> Vision"
+  else
+    VLESS_SNIS_GRPC+=("$extra_sni")
+    echo "  '$extra_sni' -> gRPC"
+  fi
 done
 
-# Derived forms reused below: EXTRA = just the additional names (space separated,
-# for Angie server_name); ALL = every name comma separated, main domain first
-# (for the JSON/API steps). Empty EXTRA => single-SNI, fully backward compatible.
+# Derived forms reused below: EXTRA = every name except the main domain (each needs
+# its own Angie cert vhost); ALL = every name comma-separated; GRPC/VISION = the
+# per-transport partitions consumed by the JSON, stream-router and host steps.
+# VISION may be empty (gRPC-only deploy) — its inbound/upstream is then omitted.
 VLESS_SNI_EXTRA="${VLESS_SNIS[*]:1}"
 VLESS_SNI_ALL=$(IFS=,; echo "${VLESS_SNIS[*]}")
-export VLESS_SNI_EXTRA VLESS_SNI_ALL
+VLESS_SNI_GRPC=$(IFS=,; echo "${VLESS_SNIS_GRPC[*]}")
+VLESS_SNI_VISION=$(IFS=,; echo "${VLESS_SNIS_VISION[*]:-}")
+export VLESS_SNI_EXTRA VLESS_SNI_ALL VLESS_SNI_GRPC VLESS_SNI_VISION
 
 # Advisory hosting/ASN check for every install mode (xray/marzban/node): all of
 # them terminate Reality on this host's subnet, so the warning is mode-agnostic.
@@ -373,6 +391,9 @@ if [[ "$INSTALL_MODE" != "node" ]]; then
   export XRAY_SID=$(openssl rand -hex 8)
   export XRAY_SID2=$(openssl rand -hex 4)
   export XRAY_SID3=$(openssl rand -hex 2)
+  # gRPC serviceName: a shared secret carried INSIDE the Reality TLS tunnel (never
+  # visible on the wire), so a random value is all that's needed.
+  export XRAY_SERVICE_NAME=$(openssl rand -hex 6)
   # One x25519 invocation gives both keys. Parse by the last whitespace field so
   # we are robust to xray's changing labels ("Public key" -> "Password" ->
   # "Password (PublicKey)").
@@ -491,25 +512,83 @@ with open(conf, 'w') as f:
 PYEOF
 }
 
-# Apply the multi-SNI pool to a freshly generated install: rewrite Reality
-# serverNames in the local xray config (node mode passes "" — the panel owns the
-# config and node_api_setup updates it via the API instead), inject the per-name
-# Angie acme_client/vhosts, and write per-domain decoys. No-op without extra names.
-apply_multi_sni() {
+# Inject the top-level Angie stream{} SNI-router that owns the public 443. It peeks
+# the SNI with ssl_preread (no TLS termination — Reality still sees the original
+# ClientHello), then proxies the raw bytes to the matching local Reality inbound
+# (gRPC names -> 127.0.0.1:8443, Vision names -> 127.0.0.1:8444, anything else ->
+# gRPC, where Reality itself decoy-falls-back). No proxy_protocol: with Reality the
+# upstream client IP isn't propagated through it anyway (xray-core #1697), and adding
+# it only risks handshake breakage, so the inbounds need no acceptProxyProtocol. The
+# listen address follows split-IP: ingress IP when set, otherwise all interfaces.
+inject_angie_stream() {
+  local conf="$1"
+  python3 - "$conf" << 'PYEOF'
+import os, sys
+conf = sys.argv[1]
+grpc = [n for n in os.environ.get('VLESS_SNI_GRPC', '').split(',') if n]
+vision = [n for n in os.environ.get('VLESS_SNI_VISION', '').split(',') if n]
+listen_addr = os.environ.get('LISTEN_ADDR', '0.0.0.0')
+listen = '443' if listen_addr in ('', '0.0.0.0') else f'{listen_addr}:443'
+
+map_lines = ''.join(f'        {n}  127.0.0.1:8443;\n' for n in grpc)
+map_lines += ''.join(f'        {n}  127.0.0.1:8444;\n' for n in vision)
+
+block = f"""stream {{
+    map $ssl_preread_server_name $xray_backend {{
+{map_lines}        default  127.0.0.1:8443;
+    }}
+
+    server {{
+        listen      {listen};
+        ssl_preread on;
+        proxy_pass  $xray_backend;
+    }}
+}}
+
+"""
+
+with open(conf) as f:
+    text = f.read()
+idx = text.find('http {')
+if idx == -1:
+    sys.stderr.write('inject_angie_stream: http block not found\n')
+    sys.exit(1)
+text = text[:idx] + block + text[idx:]
+with open(conf, 'w') as f:
+    f.write(text)
+PYEOF
+}
+
+# Apply the dual-transport layout to a freshly generated install: pin each Reality
+# inbound's serverNames to its transport partition (gRPC inbound -> gRPC names,
+# Vision inbound -> Vision names, dropping the Vision inbound entirely when no name
+# was assigned to it), inject the per-name Angie acme_client/vhosts + per-domain
+# decoys (only when extra names exist), and always inject the stream SNI-router.
+# Node mode passes "" for the xray config (the panel owns it; node_api_setup updates
+# serverNames over the API), but still gets the cert vhosts and the stream router.
+apply_transport_layout() {
   local xray_cfg="$1" angie_conf="$2"
-  [ -z "$VLESS_SNI_EXTRA" ] && return 0
 
   if [ -n "$xray_cfg" ]; then
     python3 - "$xray_cfg" << 'PYEOF'
 import json, os, sys
 path = sys.argv[1]
-names = os.environ['VLESS_SNI_ALL'].split(',')
+grpc = [n for n in os.environ.get('VLESS_SNI_GRPC', '').split(',') if n]
+vision = [n for n in os.environ.get('VLESS_SNI_VISION', '').split(',') if n]
 with open(path) as f:
     config = json.load(f)
+kept = []
 for inbound in config.get('inbounds', []):
+    tag = inbound.get('tag', '')
     reality = inbound.get('streamSettings', {}).get('realitySettings')
-    if isinstance(reality, dict) and 'serverNames' in reality:
-        reality['serverNames'] = names
+    if tag == 'VLESS GRPC REALITY' and isinstance(reality, dict):
+        reality['serverNames'] = grpc
+    elif tag == 'VLESS TCP VISION REALITY' and isinstance(reality, dict):
+        if not vision:
+            continue  # no Vision names assigned -> drop the Vision inbound
+        reality['serverNames'] = vision
+    kept.append(inbound)
+config['inbounds'] = kept
 tmp = path + '.tmp'
 with open(tmp, 'w') as f:
     json.dump(config, f, indent=2)
@@ -517,8 +596,11 @@ os.replace(tmp, path)
 PYEOF
   fi
 
-  inject_angie_extra_sni "$angie_conf"
-  write_extra_decoys
+  if [ -n "$VLESS_SNI_EXTRA" ]; then
+    inject_angie_extra_sni "$angie_conf"
+    write_extra_decoys
+  fi
+  inject_angie_stream "$angie_conf"
 }
 
 # Install marzban
@@ -543,11 +625,11 @@ xray_setup() {
     fetch "$RAW/compose-marzban" '' > ./docker-compose.yml
     fetch "$RAW/marzban" '$MARZBAN_USER $MARZBAN_PASS $MARZBAN_PATH $MARZBAN_SUB_PATH $VLESS_DOMAIN' > ./marzban/.env
     fetch "$RAW/angie-marzban" '$VLESS_DOMAIN $MARZBAN_PATH $MARZBAN_SUB_PATH $HAPP_BLOCK' > ./angie.conf
-    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_PBK $XRAY_SID $XRAY_SID2 $XRAY_SID3 $LISTEN_ADDR' > ./marzban/xray_config.json
+    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_PBK $XRAY_SID $XRAY_SID2 $XRAY_SID3 $XRAY_SERVICE_NAME' > ./marzban/xray_config.json
   else
     mkdir -p /opt/xray-vps-setup/xray
     fetch "$RAW/compose-xray" '$XRAY_VERSION' > ./docker-compose.yml
-    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_PBK $XRAY_SID $XRAY_SID2 $XRAY_SID3 $LISTEN_ADDR' > ./xray/config.json
+    fetch "$RAW/xray" '$XRAY_UUID $VLESS_DOMAIN $XRAY_PIK $XRAY_PBK $XRAY_SID $XRAY_SID2 $XRAY_SID3 $XRAY_SERVICE_NAME' > ./xray/config.json
     fetch "$RAW/angie" '$VLESS_DOMAIN' > ./angie.conf
   fi
 
@@ -560,9 +642,9 @@ xray_setup() {
   fi
 
   if [[ "${marzban_input,,}" == "y" ]]; then
-    apply_multi_sni ./marzban/xray_config.json ./angie.conf
+    apply_transport_layout ./marzban/xray_config.json ./angie.conf
   else
-    apply_multi_sni ./xray/config.json ./angie.conf
+    apply_transport_layout ./xray/config.json ./angie.conf
   fi
 }
 
@@ -576,9 +658,10 @@ node_setup() {
   touch ./ssl_client_cert.pem
   fetch "$RAW/compose-node" '' > ./docker-compose.yml
   fetch "$RAW/angie" '$VLESS_DOMAIN' > ./angie.conf
-  # Node has no local xray config (the panel owns it); only inject Angie vhosts +
-  # per-domain decoys here. The panel's serverNames/hosts are updated in node_api_setup.
-  apply_multi_sni "" ./angie.conf
+  # Node has no local xray config (the panel owns it); inject the Angie cert vhosts,
+  # per-domain decoys and the stream SNI-router here. The panel's serverNames/hosts
+  # are updated (per transport) in node_api_setup.
+  apply_transport_layout "" ./angie.conf
 }
 
 node_api_setup() {
@@ -651,15 +734,26 @@ node_api_setup() {
 import json, os
 with open('/tmp/xray_config.json') as f:
     config = json.load(f)
-# Add this node's whole SNI pool (main domain + any extras) to every Reality inbound.
-names = os.environ['VLESS_SNI_ALL'].split(',')
+# Append this node's names to the matching transport inbound BY TAG: gRPC names to the
+# gRPC inbound, Vision names to the Vision inbound. (Assumes the panel core config was
+# created by this script, so both inbound tags exist; a transport with no inbound on
+# the panel simply gets no names.)
+grpc = [n for n in os.environ.get('VLESS_SNI_GRPC', '').split(',') if n]
+vision = [n for n in os.environ.get('VLESS_SNI_VISION', '').split(',') if n]
+def add(reality, names):
+    sn = reality.setdefault('serverNames', [])
+    for name in names:
+        if name not in sn:
+            sn.append(name)
 for inbound in config.get('inbounds', []):
-    stream = inbound.get('streamSettings', {})
-    reality = stream.get('realitySettings', {})
-    if 'serverNames' in reality:
-        for name in names:
-            if name not in reality['serverNames']:
-                reality['serverNames'].append(name)
+    tag = inbound.get('tag', '')
+    reality = inbound.get('streamSettings', {}).get('realitySettings')
+    if not isinstance(reality, dict):
+        continue
+    if tag == 'VLESS GRPC REALITY':
+        add(reality, grpc)
+    elif tag == 'VLESS TCP VISION REALITY':
+        add(reality, vision)
 print(json.dumps(config))
 PYEOF
   python3 /tmp/update_servernames.py > /tmp/xray_config_updated.json \
@@ -697,11 +791,20 @@ with open('/tmp/marzban_hosts.json') as f:
     hosts = json.load(f)
 with open('/tmp/marzban_inbounds.json') as f:
     inbounds = json.load(f)
-# One host entry per SNI in the pool, so this node's subscription spreads clients
-# across all its names. A single name keeps the original (un-suffixed) remark.
-names = os.environ['VLESS_SNI_ALL'].split(',')
+# One host per SNI, but each inbound only gets the names of ITS transport (gRPC names
+# to the gRPC inbound, Vision names to the Vision inbound). port is 443 — clients reach
+# the public Angie SNI-router there, not the inbound's local 8443/8444. path stays None
+# so Marzban inherits the gRPC serviceName from the inbound.
+grpc = [n for n in os.environ.get('VLESS_SNI_GRPC', '').split(',') if n]
+vision = [n for n in os.environ.get('VLESS_SNI_VISION', '').split(',') if n]
 node_name = os.environ['HOST_NODE_NAME']
 panel_user = os.environ['HOST_PANEL_USER']
+def names_for(tag):
+    if tag == 'VLESS GRPC REALITY':
+        return grpc
+    if tag == 'VLESS TCP VISION REALITY':
+        return vision
+    return []
 inbound_info = {}
 for protocol, inbound_list in inbounds.items():
     for inbound in inbound_list:
@@ -709,6 +812,9 @@ for protocol, inbound_list in inbounds.items():
         network = inbound.get('network', 'tcp')
         inbound_info[tag] = {'protocol': protocol, 'network': network}
 for inbound_tag, host_list in hosts.items():
+    names = names_for(inbound_tag)
+    if not names:
+        continue
     info = inbound_info.get(inbound_tag, {})
     protocol = info.get('protocol', inbound_tag)
     transport = info.get('network', 'tcp')
@@ -720,7 +826,7 @@ for inbound_tag, host_list in hosts.items():
         host_list.append({
             'remark': remark,
             'address': name,
-            'port': None,
+            'port': 443,
             'sni': name,
             'host': None,
             'path': None,
@@ -954,31 +1060,44 @@ end_script() {
 import json, os, re
 with open('/tmp/panel_hosts.json') as f:
     hosts = json.load(f)
-names = os.environ['VLESS_SNI_ALL'].split(',')
+grpc = [n for n in os.environ.get('VLESS_SNI_GRPC', '').split(',') if n]
+vision = [n for n in os.environ.get('VLESS_SNI_VISION', '').split(',') if n]
 
 # Field template for a host built from scratch (when an inbound has no default host).
+# port 443: clients reach the public Angie SNI-router, not the inbound's local port.
 TEMPLATE = {
-    'remark': '', 'address': '', 'port': None, 'sni': '', 'host': None, 'path': None,
+    'remark': '', 'address': '', 'port': 443, 'sni': '', 'host': None, 'path': None,
     'security': 'inbound_default', 'alpn': '', 'fingerprint': 'firefox',
     'allowinsecure': None, 'is_disabled': None, 'mux_enable': None,
     'fragment_setting': None, 'noise_setting': None, 'random_user_agent': None,
     'use_sni_as_host': None,
 }
 
+def names_for(tag):
+    if tag == 'VLESS GRPC REALITY':
+        return grpc
+    if tag == 'VLESS TCP VISION REALITY':
+        return vision
+    return []
+
 for inbound_tag, host_list in hosts.items():
+    names = names_for(inbound_tag)
+    if not names:
+        continue
     base = dict(host_list[0]) if host_list else dict(TEMPLATE, remark=inbound_tag)
+    base['port'] = 443
     if len(names) == 1:
-        # Single SNI: preserve original behaviour — point existing host(s) (or one
-        # default) at the domain, leave remark untouched.
+        # Single name for this transport: point existing host(s) (or one default) at
+        # the name on port 443, leave remark untouched.
         if host_list:
             for host in host_list:
                 host['address'] = host['sni'] = names[0]
+                host['port'] = 443
         else:
             host_list.append(dict(base, address=names[0], sni=names[0]))
         continue
-    # Multi-SNI: rebuild the inbound's host list to exactly one entry per name, so
-    # every user's subscription spreads across all SNIs. Strip any prior " #N" so
-    # re-runs stay deterministic instead of accreting suffixes.
+    # Several names for this transport: rebuild its host list to exactly one entry per
+    # name. Strip any prior " #N" so re-runs stay deterministic, not accreting suffixes.
     base_remark = re.sub(r' #\d+$', '', base.get('remark') or inbound_tag)
     hosts[inbound_tag] = [
         dict(base, address=name, sni=name, remark=f'{base_remark} #{idx}')
@@ -1017,27 +1136,39 @@ Password: $MARZBAN_PASS
     export CLIENT_SOCKS_PORT=10808
     export CLIENT_SOCKS_USER=$(tr -dc a-z0-9 </dev/urandom | head -c 8)
     export CLIENT_SOCKS_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 16)
-    xray_config=$(fetch "$RAW/xray_outbound" '$VLESS_DOMAIN $XRAY_UUID $XRAY_PBK $XRAY_SID')
-    singbox_config=$(fetch "$RAW/sing_box_outbound" '$VLESS_DOMAIN $XRAY_UUID $XRAY_PBK $XRAY_SID')
-    xray_full=$(fetch "$RAW/xray_full_client" '$VLESS_DOMAIN $XRAY_UUID $XRAY_PBK $XRAY_SID $CLIENT_SOCKS_PORT $CLIENT_SOCKS_USER $CLIENT_SOCKS_PASS')
+    xray_config=$(fetch "$RAW/xray_outbound" '$VLESS_DOMAIN $XRAY_UUID $XRAY_PBK $XRAY_SID $XRAY_SERVICE_NAME')
+    singbox_config=$(fetch "$RAW/sing_box_outbound" '$VLESS_DOMAIN $XRAY_UUID $XRAY_PBK $XRAY_SID $XRAY_SERVICE_NAME')
+    xray_full=$(fetch "$RAW/xray_full_client" '$VLESS_DOMAIN $XRAY_UUID $XRAY_PBK $XRAY_SID $XRAY_SERVICE_NAME $CLIENT_SOCKS_PORT $CLIENT_SOCKS_USER $CLIENT_SOCKS_PASS')
 
-    final_msg="Clipboard string format:
-vless://$XRAY_UUID@$VLESS_DOMAIN:443?type=tcp&security=reality&pbk=$XRAY_PBK&fp=firefox&sni=$VLESS_DOMAIN&sid=$XRAY_SID&spx=%2F&flow=xtls-rprx-vision#Script
+    # Secondary Vision share-link, only when a name was assigned to the Vision
+    # transport. mode=gun keeps the primary gRPC link compatible with every client
+    # (sing-box has no multiMode); gRPC already multiplexes over one handshake.
+    vision_msg=""
+    if [ "${#VLESS_SNIS_VISION[@]}" -gt 0 ]; then
+      _vname="${VLESS_SNIS_VISION[0]}"
+      vision_msg="
 
-XRay outbound config:
+Secondary transport — Vision clipboard string (fallback if gRPC is throttled):
+vless://$XRAY_UUID@$_vname:443?type=tcp&security=reality&pbk=$XRAY_PBK&fp=firefox&sni=$_vname&sid=$XRAY_SID&spx=%2F&flow=xtls-rprx-vision#vision"
+    fi
+
+    final_msg="Primary transport — gRPC clipboard string:
+vless://$XRAY_UUID@$VLESS_DOMAIN:443?type=grpc&security=reality&pbk=$XRAY_PBK&fp=firefox&sni=$VLESS_DOMAIN&sid=$XRAY_SID&serviceName=$XRAY_SERVICE_NAME&mode=gun#grpc$vision_msg
+
+XRay outbound config (gRPC):
 $xray_config
 
-Sing-box outbound config:
+Sing-box outbound config (gRPC):
 $singbox_config
 
-Hardened full XRay client config (authenticated localhost SOCKS — point your apps at
+Hardened full XRay client config (gRPC, authenticated localhost SOCKS — point your apps at
 socks5://$CLIENT_SOCKS_USER:$CLIENT_SOCKS_PASS@127.0.0.1:$CLIENT_SOCKS_PORT ; UDP is off,
 set \"udp\": true only if you accept the leak risk). Protects against co-resident apps
 abusing an unauthenticated localhost proxy to discover the server IP:
 $xray_full
 
 Plain data:
-PBK: $XRAY_PBK, UUID: $XRAY_UUID
+PBK: $XRAY_PBK, UUID: $XRAY_UUID, serviceName: $XRAY_SERVICE_NAME
     "
   fi
 
