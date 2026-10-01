@@ -1,28 +1,31 @@
 services:
   angie:
-    image: docker.angie.software/angie
+    image: $ANGIE_IMAGE
     container_name: angie
-    restart: always
+    restart: unless-stopped
     network_mode: host
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     volumes:
       - angie-data:/var/lib/angie
-      - ./angie.conf:/etc/angie/angie.conf
-      - ./index.html:/tmp/index.html
-      - ./www:/var/www
+      - $RELEASE_DIR/angie.conf:/etc/angie/angie.conf:ro
+      - $RELEASE_DIR/index.html:/tmp/index.html:ro
+      - $RELEASE_DIR/www:/var/www:ro
   marzban:
-    image: gozargah/marzban:latest
+    image: $MARZBAN_IMAGE
     container_name: marzban
-    restart: always
-    env_file: ./marzban/.env
+    restart: unless-stopped
+    env_file: $RELEASE_DIR/marzban/.env
     network_mode: host
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     volumes:
-      - ./marzban/xray_config.json:/code/xray_config.json
-      - ./xray-core:/code/xray-core
-      - ./marzban_lib:/var/lib/marzban
-      - ./marzban/templates:/var/lib/marzban/templates
+      - $RELEASE_DIR/marzban/xray_config.json:/code/xray_config.json
+      - $RELEASE_DIR/xray-core:/code/xray-core:ro
+      - $INSTALL_ROOT/marzban_lib:/var/lib/marzban
 
 volumes:
   angie-data:
-    driver: local
-    external: false
     name: angie-data

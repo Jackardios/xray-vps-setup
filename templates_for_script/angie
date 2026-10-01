@@ -1,7 +1,7 @@
 user angie;
 worker_processes auto;
 
-error_log /var/log/angie/error.log notice;
+error_log /dev/stderr warn;
 
 events {
     worker_connections 1024;
@@ -9,7 +9,7 @@ events {
 
 http {
     log_format main '[$time_local] $proxy_protocol_addr "$http_referer" "$http_user_agent"';
-    access_log /var/log/angie/access.log main;
+    access_log off;
 
     # Hide the angie version from the Server header and error pages.
     server_tokens off;

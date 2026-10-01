@@ -1,33 +1,39 @@
 services:
-  marzban-node:
-    image: gozargah/marzban-node:latest
-    container_name: marzban-node
-    restart: always
-    network_mode: host
-    environment:
-      XRAY_EXECUTABLE_PATH: "/tmp/xray-core/xray"
-      SERVICE_PORT: 62001
-      XRAY_API_PORT: 62002
-      SSL_CERT_FILE: "/tmp/ssl_cert.pem"
-      SSL_KEY_FILE: "/tmp/ssl_key.pem"
-      SSL_CLIENT_CERT_FILE: "/tmp/ssl_client_cert.pem"
-      SERVICE_PROTOCOL: "rest"
-    volumes:
-      - ./xray-core:/tmp/xray-core
-      - ./ssl_client_cert.pem:/tmp/ssl_client_cert.pem
   angie:
-    image: docker.angie.software/angie
+    image: $ANGIE_IMAGE
     container_name: angie
-    restart: always
+    restart: unless-stopped
     network_mode: host
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     volumes:
       - angie-data:/var/lib/angie
-      - ./angie.conf:/etc/angie/angie.conf
-      - ./index.html:/tmp/index.html
-      - ./www:/var/www
+      - $RELEASE_DIR/angie.conf:/etc/angie/angie.conf:ro
+      - $RELEASE_DIR/index.html:/tmp/index.html:ro
+      - $RELEASE_DIR/www:/var/www:ro
+  marzban-node:
+    image: $NODE_IMAGE
+    container_name: marzban-node
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      XRAY_EXECUTABLE_PATH: /tmp/xray-core/xray
+      XRAY_ASSETS_PATH: /tmp/xray-core
+      SERVICE_PORT: 62001
+      XRAY_API_PORT: 62002
+      SSL_CERT_FILE: /var/lib/marzban-node/ssl_cert.pem
+      SSL_KEY_FILE: /var/lib/marzban-node/ssl_key.pem
+      SSL_CLIENT_CERT_FILE: /tmp/ssl_client_cert.pem
+      SERVICE_PROTOCOL: rest
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    volumes:
+      - $RELEASE_DIR/xray-core:/tmp/xray-core:ro
+      - $RELEASE_DIR/ssl_client_cert.pem:/tmp/ssl_client_cert.pem:ro
+      - $INSTALL_ROOT/node_data:/var/lib/marzban-node
 
 volumes:
   angie-data:
-    driver: local
-    external: false
     name: angie-data

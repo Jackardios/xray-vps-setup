@@ -1,0 +1,82 @@
+[
+  {
+    "check": "Password backslash lost by read",
+    "reproduced": true,
+    "evidence": {
+      "exit": 0,
+      "result": "AuditPassword123"
+    }
+  },
+  {
+    "check": "Failed randomness accepted",
+    "reproduced": true,
+    "evidence": {
+      "exit": 0,
+      "values": "|||"
+    }
+  },
+  {
+    "check": "Failed Docker installer download accepted",
+    "reproduced": true,
+    "evidence": {
+      "exit": 0,
+      "output": "continued"
+    }
+  },
+  {
+    "check": "Failed fetch destroys existing destination",
+    "reproduced": true,
+    "evidence": {
+      "exit": 1,
+      "bytes_left": 0
+    }
+  },
+  {
+    "check": "Missing TERM prevents final output",
+    "reproduced": true,
+    "evidence": {
+      "exit": 1
+    }
+  },
+  {
+    "check": "Invalid or conflicting SSH ports accepted",
+    "reproduced": true,
+    "evidence": [
+      "0",
+      "-1",
+      "65536",
+      "8443",
+      "62001",
+      "2222+1"
+    ]
+  },
+  {
+    "check": "Non-root refusal returns success",
+    "reproduced": true,
+    "evidence": {
+      "exit": 0
+    }
+  },
+  {
+    "check": "No ssh.socket restart",
+    "observed": true,
+    "evidence": "Static observation; activation mode requires checking on the target Linux host"
+  },
+  {
+    "check": "Embedded Python syntax",
+    "passed": true,
+    "blocks": 6
+  },
+  {
+    "check": "Document Bash syntax",
+    "passed": true,
+    "blocks": 16
+  },
+  {
+    "check": "Xray accepts empty shortIds after randomness failure",
+    "reproduced": true,
+    "evidence": {
+      "exit": 0
+    }
+  }
+]
