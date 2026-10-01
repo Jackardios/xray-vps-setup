@@ -71,6 +71,10 @@ def validate_state(state):
         raise ValueError('Duplicate domains or more than five SNI names')
     if any(domain(name) != name for name in all_names):
         raise ValueError('Domains must be canonical')
+    if 'connection_name' in state:
+        name = state['connection_name']
+        if not isinstance(name, str) or not name.strip() or len(name) > 64 or any(ord(c) < 32 or ord(c) == 127 for c in name):
+            raise ValueError('Connection name must contain 1-64 characters without control characters')
     ingress, egress = state.get('ingress', ''), state.get('egress', '')
     if bool(ingress) != bool(egress):
         raise ValueError('Split-IP requires both addresses')
@@ -292,14 +296,26 @@ def panel_contract(config, required):
     return config
 
 
-def update_hosts(hosts, names, prefix=None):
+def update_hosts(hosts, names, prefix=None, connection_name=None, previous_name=None):
     hosts = copy.deepcopy(hosts)
     for transport, entries in names.items():
         tag = TAGS[transport]
         values = hosts.setdefault(tag, [])
-        owner_prefix = f'{prefix or "Local"} [{transport}] #'
+        # Marzban formats remarks as templates; braces in a literal name must be escaped.
+        label = (connection_name or prefix or 'Local').replace('{', '{{').replace('}', '}}')
+        owner_prefix = f'{label} [{transport}] #'
+        old_prefixes = {name.replace('{', '{{').replace('}', '}}') + f' [{transport}] #'
+                        for name in (prefix or 'Local', previous_name) if name}
+        # Rename the existing owned rows before reconciling; custom/other-node rows survive.
+        for host in values:
+            for old_prefix in old_prefixes:
+                remark = host.get('remark', '')
+                if remark.startswith(old_prefix) and remark[len(old_prefix):].isdigit():
+                    host['remark'] = owner_prefix + remark[len(old_prefix):]
+                    break
         expected_remarks = {owner_prefix + str(n) for n in range(1, len(entries)+1)}
-        values[:] = [h for h in values if not (h.get('remark', '').startswith(owner_prefix) and h['remark'] not in expected_remarks)]
+        values[:] = [h for h in values if not (h.get('remark', '').startswith(owner_prefix) and
+                    h['remark'][len(owner_prefix):].isdigit() and h['remark'] not in expected_remarks)]
         if not entries:
             if prefix is None:
                 for host in hosts.get(TAGS[transport], []):
@@ -313,11 +329,11 @@ def update_hosts(hosts, names, prefix=None):
                 default.update(address=entries[0], sni=entries[0], port=443, fingerprint='firefox', is_disabled=False,
                                remark=owner_prefix+'1')
         for number, name in enumerate(entries, 1):
-            remark = f'{prefix or "Local"} [{transport}] #{number}'
+            remark = owner_prefix + str(number)
             match = next((h for h in values if h.get('remark') == remark or
                           (prefix is None and h.get('sni') == name)), None)
             if match:
-                match.update(address=name, sni=name, port=443, fingerprint='firefox', is_disabled=False)
+                match.update(address=name, sni=name, port=443, fingerprint='firefox', is_disabled=False, remark=remark)
             else:
                 values.append({'remark': remark, 'address': name, 'sni': name, 'port': 443,
                                'fingerprint': 'firefox', 'security': 'inbound_default', 'is_disabled': False,

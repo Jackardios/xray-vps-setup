@@ -71,3 +71,26 @@ apply_firewall() {
     apply_family ip6tables ip6tables-restore 6
   fi
 }
+
+check_firewall() {
+  local tool first family dest=()
+  for family in 4 6; do
+    [[ "$family" == 4 || -e /proc/net/if_inet6 ]] || continue
+    tool=iptables
+    [[ "$family" == 4 ]] || tool=ip6tables
+    first=$("$tool" -w 10 -S INPUT | awk '$1=="-A" && !seen++ {print}') || return 1
+    [[ "$first" == '-A INPUT -j XRAY_SETUP' ]] || return 1
+    "$tool" -w 10 -C XRAY_SETUP -p tcp -m multiport --dports 4123,8443,8444,8000,40000 -j REJECT --reject-with tcp-reset || return 1
+    if [[ "$INSTALL_MODE" == node ]]; then
+      "$tool" -w 10 -C XRAY_SETUP -p tcp -m multiport --dports 62001,62002 -j REJECT --reject-with tcp-reset || return 1
+    fi
+    if [[ -n "${SSH_NEW_PORT:-}" ]]; then
+      "$tool" -w 10 -C XRAY_SETUP -j DROP || return 1
+      if [[ "$family" == 4 || -z "$INGRESS_IP" ]]; then
+        dest=()
+        [[ -z "$EGRESS_IP" ]] || dest=(-d "$EGRESS_IP")
+        "$tool" -w 10 -C XRAY_SETUP -p tcp "${dest[@]}" --dport "$SSH_NEW_PORT" -j ACCEPT || return 1
+      fi
+    fi
+  done
+}

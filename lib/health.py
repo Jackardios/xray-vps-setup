@@ -3,9 +3,22 @@
 import json
 import socket
 import ssl
+import subprocess
 import sys
 import time
 from pathlib import Path
+
+
+def check_containers(state):
+    names = ['angie', 'marzban-node' if state['mode'] == 'node' else state['mode']]
+    result = subprocess.run(['docker', 'inspect', *names], capture_output=True, text=True, check=True, timeout=15)
+    containers = json.loads(result.stdout)
+    if len(containers) != len(names):
+        raise RuntimeError('Expected containers are missing')
+    for container in containers:
+        status = container['State']
+        if not status['Running'] or status.get('Restarting') or status.get('Paused'):
+            raise RuntimeError('Container is not running normally: ' + container['Name'])
 
 
 def probe(state, timeout=180):
@@ -34,6 +47,9 @@ def probe(state, timeout=180):
 
 if __name__ == '__main__':
     try:
-        probe(json.loads(Path(sys.argv[1]).read_text()))
-    except RuntimeError as error:
+        state = json.loads(Path(sys.argv[1]).read_text())
+        if '--runtime' in sys.argv[2:]:
+            check_containers(state)
+        probe(state)
+    except (RuntimeError, subprocess.SubprocessError) as error:
         raise SystemExit('ERROR: ' + str(error))

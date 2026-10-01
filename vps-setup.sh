@@ -89,9 +89,8 @@ rollback_system() {
     systemctl disable xray-setup-firewall.service >/dev/null 2>&1 || true
     rm -f /etc/systemd/system/xray-setup-firewall.service || failed=y
   fi
-  systemctl daemon-reload || failed=y
-  if systemctl is-active --quiet ssh.socket; then systemctl restart ssh.socket || failed=y; fi
-  systemctl restart ssh.service || failed=y
+  source "$LIB/ssh.sh"
+  restart_ssh || failed=y
   if [[ -f "$INSTALL_ROOT/docker-compose.yml" ]]; then
     docker compose -p xray-vps-setup -f "$INSTALL_ROOT/docker-compose.yml" up -d || { failed=y; log 'Previous stack did not restart; backup retained.' >&2; }
   fi
@@ -455,7 +454,7 @@ PY
   if [[ "$INSTALL_MODE" == node ]]; then
     compose_template=compose-node
     fetch angie '$VLESS_DOMAIN' > ./angie.conf
-    python3 "$LIB/panel_api.py" prepare "$STATE_FILE" ./api-transaction.json ./ssl_client_cert.pem
+    python3 "$LIB/panel_api.py" prepare "$STATE_FILE" ./api-transaction.json ./ssl_client_cert.pem "${OLD_CURRENT:+$OLD_CURRENT/state.json}"
   else
     compose_template="compose-$INSTALL_MODE"
     if [[ "$INSTALL_MODE" == marzban ]]; then
@@ -633,7 +632,7 @@ PY
       sleep 3
     done
     [[ "$imported" == y ]] || die 'Panel administrator initialization failed'
-    python3 "$LIB/panel_api.py" local-hosts "$STATE_FILE"
+    python3 "$LIB/panel_api.py" local-hosts "$STATE_FILE" "${OLD_CURRENT:+$OLD_CURRENT/state.json}"
   elif [[ "$INSTALL_MODE" == node ]]; then
     python3 "$LIB/panel_api.py" apply "$RELEASE_DIR/api-transaction.json"
   fi
@@ -682,11 +681,12 @@ else:
     atomic_write(release/'client.json',full)
     text.append('Client config with SOCKS authentication: '+str(release/'client.json'))
     for transport,names in s['names'].items():
-        for name in names:
+        for number,name in enumerate(names,1):
             params={'type':'grpc' if transport=='grpc' else 'tcp','security':'reality','pbk':k['public'],'fp':'firefox','sni':name,'sid':k['short_ids'][0]}
             if transport=='grpc': params.update(serviceName=k['service'],mode='gun')
             else: params['flow']='xtls-rprx-vision'
-            text.append(f"vless://{k['uuid']}@{name}:443?{urllib.parse.urlencode(params)}#{transport}")
+            label=f"{s['connection_name']} [{transport}] #{number}" if s.get('connection_name') else transport
+            text.append(f"vless://{k['uuid']}@{name}:443?{urllib.parse.urlencode(params)}#{urllib.parse.quote(label, safe='')}")
 if s.get('ssh'):
     ssh=s['ssh'];text += [f"SSH: {ssh['user']} port {ssh['port']}", 'Saved sudo password (newly created user only): '+ssh.get('password','')]
     if not s.get('ssh_confirmed'):
@@ -744,10 +744,30 @@ PYMETA
     [[ -n "$OLD_CURRENT" ]] || die 'No managed installation to check'
     STATE_FILE="$OLD_CURRENT/state.json"
     python3 "$LIB/setup_config.py" validate "$STATE_FILE"
+    local settings
+    settings=$(python3 "$LIB/setup_config.py" export "$STATE_FILE")
+    eval "$settings"
+    settings=$(python3 - "$STATE_FILE" <<'PY'
+import json,shlex,sys
+s=json.load(open(sys.argv[1]));ssh=s.get('ssh') or {}
+for key,value in [('SSH_NEW_PORT',str(ssh.get('port',''))),('SSH_USER',ssh.get('user','')),('SSH_CONFIRMED','y' if s.get('ssh_confirmed') else 'n')]:
+    print(key+'='+shlex.quote(value))
+PY
+)
+    eval "$settings"
+    source "$LIB/ssh.sh"
+    source "$LIB/firewall.sh"
+    check_firewall || die 'Managed firewall jump or required rules are missing'
+    systemctl is-enabled --quiet xray-setup-firewall.service || die 'Firewall boot restoration is not enabled'
+    if [[ -n "$SSH_NEW_PORT" ]]; then
+      sshd -t
+      check_ssh_listener || die 'Saved SSH port has no IPv4 listener'
+      if [[ "$SSH_CONFIRMED" == y ]]; then check_ssh_policy || die 'Confirmed SSH authentication policy has drifted'; fi
+    fi
     check_network
     docker compose -p xray-vps-setup -f "$INSTALL_ROOT/docker-compose.yml" config --quiet
-    python3 "$LIB/health.py" "$STATE_FILE"
-    log 'Existing deployment TLS/HTTP checks passed.'
+    python3 "$LIB/health.py" "$STATE_FILE" --runtime
+    log 'Existing deployment container, firewall, SSH and TLS/HTTP checks passed.'
     return
   fi
   install -d -m 0700 "$INSTALL_ROOT/releases" "$INSTALL_ROOT/backups" "$INSTALL_ROOT/lib" "$INSTALL_ROOT/marzban_lib" "$INSTALL_ROOT/node_data"

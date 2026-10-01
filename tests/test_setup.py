@@ -16,6 +16,9 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'lib'))
 import setup_config as cfg
 import panel_api as api
+import configure
+import health
+import ssh_policy
 
 TEMPLATE=(ROOT/'templates_for_script/xray').read_text()
 BINARY=os.environ.get('XRAY_TEST_BINARY')
@@ -118,6 +121,44 @@ class ConfigurationTests(unittest.TestCase):
         removed=cfg.update_hosts(enabled,{'vision':[]})
         self.assertEqual(removed[cfg.TAGS['vision']],[node])
 
+    def test_connection_name_renames_owned_profiles_without_duplicates(self):
+        names={'grpc':['main.example.com','extra.example.com'],'vision':[]}
+        hosts=cfg.update_hosts({},names)
+        remote={'remark':'Node remote [grpc] #1','address':'remote.example.com','sni':'remote.example.com'}
+        hosts[cfg.TAGS['grpc']].append(remote)
+        renamed=cfg.update_hosts(hosts,names,connection_name='Мой VPN')
+        self.assertEqual([h['remark'] for h in renamed[cfg.TAGS['grpc']]],
+                         ['Мой VPN [grpc] #1','Мой VPN [grpc] #2',remote['remark']])
+        changed=cfg.update_hosts(renamed,{'grpc':['main.example.com'],'vision':[]},
+                                 connection_name='Новый VPN',previous_name='Мой VPN')
+        self.assertEqual([h['remark'] for h in changed[cfg.TAGS['grpc']]],['Новый VPN [grpc] #1',remote['remark']])
+        self.assertEqual(changed, cfg.update_hosts(changed,{'grpc':['main.example.com'],'vision':[]},connection_name='Новый VPN'))
+        self.assertEqual(changed[cfg.TAGS['grpc']][1],remote)
+
+    def test_reconfigure_keeps_saved_connection_name_on_empty_answer(self):
+        with tempfile.TemporaryDirectory() as d:
+            previous=Path(d)/'previous.json';output=Path(d)/'state.json'
+            s=state();s['connection_name']='Мой VPN';cfg.save_json(previous,s)
+            with patch('builtins.input',side_effect=['']*6):
+                configure.configure(output,'/unused',previous)
+            self.assertEqual(json.loads(output.read_text())['connection_name'],'Мой VPN')
+
+    def test_connection_name_braces_are_literal_in_panel_templates(self):
+        hosts=cfg.update_hosts({}, {'grpc':['main.example.com']}, connection_name='VPN {home}')
+        remark=hosts[cfg.TAGS['grpc']][0]['remark']
+        self.assertEqual(remark.format_map({}), 'VPN {home} [grpc] #1')
+        self.assertEqual(hosts,cfg.update_hosts(hosts,{'grpc':['main.example.com']},connection_name='VPN {home}'))
+
+    def test_egress_change_requires_new_ssh_confirmation(self):
+        for old,new in [('', '192.0.2.2'), ('192.0.2.3','192.0.2.2'), ('192.0.2.2','192.0.2.2'), ('192.0.2.2','')]:
+            with self.subTest(old=old,new=new),tempfile.TemporaryDirectory() as d:
+                s=state();s.update(egress=old,ingress='192.0.2.1' if old else '',ssh_confirmed=True,
+                                  ssh={'user':'operator','port':22,'public_key':'ssh-ed25519 fixture','password':'fixture'})
+                p=Path(d);cfg.save_json(p/'old.json',s)
+                answers=['','','', 'y' if new else 'n']+(['192.0.2.1',new] if new else [])+['n','n']
+                with patch('builtins.input',side_effect=answers): configure.configure(p/'new.json','/unused',p/'old.json')
+                self.assertEqual(json.loads((p/'new.json').read_text())['ssh_confirmed'],old==new)
+
     def test_dns_all_records_and_split_ipv6(self):
         s=state();s['names']['vision']=[]
         cfg.check_dns(s,['192.0.2.1','2001:db8::1'],{'main.example.com':['192.0.2.1','2001:db8::1']})
@@ -219,6 +260,27 @@ class ApiTests(unittest.TestCase):
         with self.assertRaises(api.ApiError): api.apply(self.path)
         self.assertEqual(FakeClient.shared['/api/core/config'],self.journal['before_core'])
         self.assertEqual(json.loads(self.path.read_text())['status'],'rolled_back')
+
+    def test_auto_created_marzban_host_does_not_abort_transaction(self):
+        original=FakeClient.request
+        def request(client,method,path,*args,**kwargs):
+            result=original(client,method,path,*args,**kwargs)
+            if method=='PUT' and path=='/api/core/config' and cfg.TAGS['vision'] not in self.journal['before_hosts']:
+                FakeClient.shared['/api/hosts'].setdefault(cfg.TAGS['vision'],[])
+                if any(i['tag']==cfg.TAGS['vision'] for i in FakeClient.shared[path]['inbounds']):
+                    FakeClient.shared['/api/hosts'][cfg.TAGS['vision']]=[copy.deepcopy(api.DEFAULT_HOST)]
+            return result
+        with patch.object(FakeClient,'request',request): api.apply(self.path)
+        self.assertEqual(json.loads(self.path.read_text())['status'],'applied')
+        self.assertEqual(FakeClient.shared['/api/hosts'],self.journal['desired_hosts'])
+
+    def test_new_host_concurrent_edits_are_still_rejected(self):
+        for change in ['remark','address','extra']:
+            current=copy.deepcopy(self.journal['before_hosts'])
+            current[cfg.TAGS['vision']]=[copy.deepcopy(api.DEFAULT_HOST)]
+            if change=='extra': current[cfg.TAGS['vision']].append(copy.deepcopy(api.DEFAULT_HOST))
+            else: current[cfg.TAGS['vision']][0][change]='custom'
+            with self.subTest(change=change),self.assertRaises(api.ApiError): api.check_hosts_after_core(self.journal,current)
 
     def test_concurrent_core_not_overwritten(self):
         FakeClient.shared['/api/core/config']['external']='edit'
@@ -342,6 +404,35 @@ prepare_ssh'''
                 self.assertNotIn('SHOULD_NOT_CONTINUE',result.stdout)
                 self.assertEqual((p/'restored').read_text(),'restored\n')
 
+    def test_complete_ssh_confirmation_with_relocated_system_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);install=p/'install';(install/'lib').mkdir(parents=True);(install/'current').mkdir()
+            (p/'etc/ssh/sshd_config.d').mkdir(parents=True)
+            (p/'etc/ssh/sshd_config').write_text('Include '+str(p/'etc/ssh/sshd_config.d/*.conf')+'\n')
+            (p/'etc/ssh/sshd_config.d/00-xray-vps-setup.conf').write_text('Port 22\n')
+            (install/'ssh-transition.env').write_text(f'INSTALL_ROOT="{install}"\nINSTALL_MODE=xray\nINGRESS_IP=""\nEGRESS_IP=""\nSSH_NEW_PORT=22\nSSH_USER=operator\nSSH_OLD_PORTS=(22)\n')
+            cfg.save_json(install/'current/state.json',{'ssh_confirmed':False})
+            for name in ['ssh.sh','firewall.sh','confirm-access.sh']:
+                source=(ROOT/'lib'/name).read_text().replace('/etc/',str(p/'etc')+'/').replace('/opt/xray-vps-setup',str(install))
+                if name=='confirm-access.sh': source='\n'.join(line for line in source.splitlines() if not line.startswith('[[ $EUID'))+'\n'
+                (install/'lib'/name).write_text(source)
+            for name in ['ssh_policy.py','setup_config.py']: (install/'lib'/name).write_text((ROOT/'lib'/name).read_text())
+            body=f'''export SUDO_USER=operator SSH_CONNECTION='192.0.2.4 12345 192.0.2.1 22'
+systemctl() {{ echo "$*" >> "{p}/systemctl"; }}
+systemd-run() {{ :; }}
+flock() {{ :; }}
+sshd() {{ if [[ "$1" == -T ]]; then printf 'passwordauthentication no\nkbdinteractiveauthentication no\npermitrootlogin no\npubkeyauthentication yes\nauthenticationmethods any\n'; fi; }}
+ss() {{ echo listener; }}
+iptables-save() {{ echo fixture; }}
+iptables-restore() {{ cat >/dev/null; }}
+iptables() {{ if [[ "$*" == *' -C '* ]]; then return 1; fi; }}
+source "{install}/lib/confirm-access.sh"'''
+            result=self.run_shell(body)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertTrue(json.loads((install/'current/state.json').read_text())['ssh_confirmed'])
+            self.assertIn('restart ssh.socket ssh.service',(p/'systemctl').read_text())
+            self.assertEqual(list(install.glob('ssh-confirm.*')),[])
+
     def test_checkpoint_replaces_stale_link_after_interruption(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)
@@ -399,7 +490,10 @@ prepare_ssh'''
             result=self.run_shell(body)
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual((p/'etc/ssh/sshd_config.d/00-xray-vps-setup.conf').read_text(),'Port 22\n')
-            self.assertEqual((p/'etc/systemd/system/ssh.socket.d/zz-xray-vps-setup.conf').read_text().count('ListenStream=22'),1)
+            socket_config=(p/'etc/systemd/system/ssh.socket.d/zz-xray-vps-setup.conf').read_text()
+            self.assertEqual(socket_config.count('ListenStream=0.0.0.0:22'),1)
+            self.assertNotIn('ListenStream=22',socket_config)
+            self.assertIn('BindIPv6Only=ipv6-only',socket_config)
             self.assertEqual((p/'home/operator/.ssh/authorized_keys').read_text(),'fixture-public-key\n')
 
     def test_node_firewall_is_ordered_private_and_repeatable(self):
@@ -419,6 +513,108 @@ apply_family iptables iptables-restore 4
             self.assertIn('--dport 22 -j ACCEPT',rules);self.assertIn('--dport 2222 -j ACCEPT',rules)
             self.assertNotIn('2001:db8',rules);self.assertNotIn('-P INPUT',rules)
             self.assertIn('-I INPUT 1 -j XRAY_SETUP',(p/'commands').read_text())
+
+    def test_ssh_ports_include_socket_and_running_daemon(self):
+        result=self.run_shell(f'''source "{ROOT}/lib/ssh.sh"
+sshd() {{ echo 'port 22'; }}
+ss() {{ echo 'LISTEN 0 128 0.0.0.0:2022 0.0.0.0:* users:(("sshd",pid=1,fd=3))'; }}
+systemctl() {{ if [[ "$1" == show ]]; then echo '0.0.0.0:2222 (Stream) [::]:2222 (Stream)'; fi; }}
+existing_ssh_ports''')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(result.stdout,'22\n2022\n2222\n')
+
+    def test_ipv6_listener_cannot_satisfy_ssh_readiness(self):
+        result=self.run_shell(f'''source "{ROOT}/lib/ssh.sh"
+SSH_NEW_PORT=22
+ss() {{ if [[ "$1" != -4 ]]; then echo listener; fi; }}
+if check_ssh_listener; then echo wrong; else echo rejected; fi''')
+        self.assertEqual(result.stdout,'rejected\n',result.stderr)
+
+    def test_ssh_restart_uses_one_socket_service_transaction(self):
+        result=self.run_shell(f'''source "{ROOT}/lib/ssh.sh"
+systemctl() {{ echo "$*"; if [[ "$1" == is-active ]]; then return 1; fi; }}
+restart_ssh''')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('restart ssh.socket ssh.service\n',result.stdout)
+
+    def test_confirmation_rollback_restarts_ssh_despite_firewall_failure(self):
+        source=(ROOT/'lib/confirm-access.sh').read_text()
+        start=source.index('cat > "$RUN_DIR/rollback.sh"');end=source.index('chmod 0700',start)
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);(p/'lib').mkdir();(p/'etc/ssh/sshd_config.d').mkdir(parents=True)
+            for name in ['state.json','ssh.conf','ipv4']: (p/name).write_text('fixture')
+            (p/'lib/ssh.sh').write_text('restart_ssh() { echo restarted; }\n')
+            generator=source[start:end].replace('/etc/',str(p/'etc')+'/')
+            body=f'''RUN_DIR="{p}"; STATE_FILE="{p}/restored.json"; INSTALL_ROOT="{p}"
+{generator}
+iptables-restore() {{ cat >/dev/null; return 1; }}
+systemctl() {{ echo "$*"; }}
+source "$RUN_DIR/rollback.sh"'''
+            result=self.run_shell(body)
+            self.assertEqual(result.returncode,1,result.stderr)
+            self.assertIn('restarted\n',result.stdout)
+            self.assertIn('enable xray-setup-firewall.service',result.stdout)
+            self.assertEqual((p/'restored.json').read_text(),'fixture')
+
+    def test_failed_confirmation_rollback_keeps_timer_armed(self):
+        source=(ROOT/'lib/confirm-access.sh').read_text()
+        start=source.index('rollback() {');end=source.index("printf 'Port %s",start)
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);script=p/'rollback.sh';script.write_text('#!/bin/sh\nexit 1\n');script.chmod(0o700)
+            result=self.run_shell(f'RUN_DIR="{p}"; unit=fixture\nsystemctl() {{ echo "$*"; }}\n'+source[start:end]+'false')
+            self.assertEqual(result.returncode,1)
+            self.assertNotIn('stop fixture.timer',result.stdout)
+            self.assertIn('timer and recovery files retained',result.stderr)
+
+    def test_firewall_check_detects_bypass_and_missing_ssh_allow(self):
+        for fault in ['', 'bypass', 'missing-ssh']:
+            with self.subTest(fault=fault):
+                result=self.run_shell(f'''source "{ROOT}/lib/firewall.sh"
+INSTALL_MODE=xray; INGRESS_IP=''; EGRESS_IP=''; SSH_NEW_PORT=22
+iptables() {{
+ if [[ "$*" == *' -S INPUT'* ]]; then
+   [[ '{fault}' != bypass ]] || echo '-A INPUT -j ACCEPT'
+   echo '-A INPUT -j XRAY_SETUP'
+ elif [[ '{fault}' == missing-ssh && "$*" == *'--dport 22 -j ACCEPT'* ]]; then return 1
+ elif [[ "$*" != *' -C '* ]]; then echo MUTATION; return 1
+ fi
+}}
+ip6tables() {{ iptables "$@"; }}
+check_firewall''')
+                self.assertEqual(result.returncode,0 if not fault else 1,result.stderr)
+                self.assertNotIn('MUTATION',result.stdout)
+
+
+class SshPolicyTests(unittest.TestCase):
+    def test_match_auth_overrides_in_nested_includes_are_rejected(self):
+        for directive in ['PasswordAuthentication yes','PermitRootLogin prohibit-password',
+                          'KbdInteractiveAuthentication=yes','ChallengeResponseAuthentication yes']:
+            with self.subTest(directive=directive),tempfile.TemporaryDirectory() as d:
+                p=Path(d);(p/'included').write_text('Match User root\n'+directive+'\n')
+                (p/'config').write_text('PasswordAuthentication no\nInclude '+str(p/'included')+'\n')
+                with self.assertRaises(ValueError): ssh_policy.check(p/'config')
+
+    def test_safe_match_settings_and_recursive_include(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'config';p.write_text('Match User root\nPermitRootLogin no\nX11Forwarding no\n')
+            ssh_policy.check(p)
+            p.write_text('Include '+str(p)+'\n')
+            with self.assertRaises(ValueError): ssh_policy.check(p)
+
+
+class RuntimeHealthTests(unittest.TestCase):
+    def test_stopped_restarting_and_paused_containers_are_rejected(self):
+        for mode in ['xray','marzban','node']:
+            for fault in ['', 'Running','Restarting','Paused']:
+                names=['angie','marzban-node' if mode=='node' else mode]
+                containers=[{'Name':name,'State':{'Running':True,'Restarting':False,'Paused':False}} for name in names]
+                if fault: containers[1]['State'][fault]=fault!='Running'
+                with self.subTest(mode=mode,fault=fault),patch('health.subprocess.run') as run:
+                    run.return_value.stdout=json.dumps(containers)
+                    if fault:
+                        with self.assertRaises(RuntimeError): health.check_containers({'mode':mode})
+                    else: health.check_containers({'mode':mode})
+                    self.assertEqual(run.call_args.args[0],['docker','inspect',*names])
 
 
 @unittest.skipUnless(BINARY,'Set XRAY_TEST_BINARY for actual Xray config acceptance')

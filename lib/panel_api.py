@@ -16,6 +16,25 @@ class ApiError(RuntimeError):
     pass
 
 
+# Marzban v0.8.4 creates this host when a newly added inbound is first read.
+DEFAULT_HOST = {'remark': '🚀 Marz ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]', 'address': '{SERVER_IP}',
+                'port': None, 'sni': None, 'host': None, 'path': None, 'security': 'inbound_default',
+                'alpn': '', 'fingerprint': '', 'allowinsecure': None, 'is_disabled': False,
+                'mux_enable': False, 'fragment_setting': None, 'noise_setting': None,
+                'random_user_agent': False, 'use_sni_as_host': False}
+
+
+def check_hosts_after_core(journal, current):
+    old = journal['before_hosts']
+    new_tags = ({i['tag'] for i in journal['desired_core']['inbounds']} -
+                {i['tag'] for i in journal['before_core']['inbounds']})
+    if any(current.get(k) != v for k, v in old.items()):
+        raise ApiError('Hosts changed concurrently after core update')
+    for tag, hosts in current.items():
+        if tag not in old and hosts and (tag not in new_tags or hosts != [DEFAULT_HOST]):
+            raise ApiError('Hosts changed concurrently after core update')
+
+
 class Client:
     def __init__(self, base, token=''):
         self.base, self.token = base, token
@@ -72,13 +91,15 @@ def put_checked(client, path, before, desired):
     return after
 
 
-def prepare(state, journal_path, cert_path):
+def prepare(state, journal_path, cert_path, previous_path=''):
     client = Client('https://' + state['panel_domain'])
     client.authenticate(state['panel_user'], getpass.getpass('Panel admin password: '))
     before_core = client.request('GET', '/api/core/config')
     desired_core = panel_contract(before_core, state['names'])
     before_hosts = client.request('GET', '/api/hosts')
-    desired_hosts = update_hosts(before_hosts, state['names'], 'Node ' + state['node_name'])
+    previous = json.loads(Path(previous_path).read_text()) if previous_path else {}
+    desired_hosts = update_hosts(before_hosts, state['names'], 'Node ' + state['node_name'],
+                                 state.get('connection_name'), previous.get('connection_name'))
     cert = client.request('GET', '/api/node/settings')['certificate']
     if '-----BEGIN CERTIFICATE-----' not in cert:
         raise ApiError('Panel returned an invalid client certificate')
@@ -137,9 +158,7 @@ def apply(journal_path):
         for field, path in [('core', '/api/core/config'), ('hosts', '/api/hosts')]:
             if field == 'hosts':
                 current = client.request('GET', path)
-                old = journal['before_hosts']
-                if any(current.get(k) != v for k, v in old.items()) or any(v for k, v in current.items() if k not in old):
-                    raise ApiError('Hosts changed concurrently after core update')
+                check_hosts_after_core(journal, current)
                 journal['before_hosts'] = current
             # Write intent before the HTTP mutation, so interrupted requests can be reconciled.
             journal['operations'].append(field)
@@ -188,7 +207,7 @@ def apply(journal_path):
         raise
 
 
-def local_hosts(state):
+def local_hosts(state, previous_path=''):
     client = Client('http://127.0.0.1:8000')
     deadline = time.monotonic() + 90
     while True:
@@ -200,7 +219,9 @@ def local_hosts(state):
                 raise ApiError('Cannot authenticate local panel; existing DB credentials must match saved state')
             time.sleep(2)
     before = client.request('GET', '/api/hosts')
-    put_checked(client, '/api/hosts', before, update_hosts(before, state['names']))
+    previous = json.loads(Path(previous_path).read_text()) if previous_path else {}
+    put_checked(client, '/api/hosts', before, update_hosts(before, state['names'],
+                connection_name=state.get('connection_name'), previous_name=previous.get('connection_name')))
 
 
 if __name__ == '__main__':
@@ -209,7 +230,7 @@ if __name__ == '__main__':
     try:
         command = sys.argv[1]
         if command == 'prepare':
-            prepare(json.loads(Path(sys.argv[2]).read_text()), sys.argv[3], sys.argv[4])
+            prepare(json.loads(Path(sys.argv[2]).read_text()), sys.argv[3], sys.argv[4], sys.argv[5] if len(sys.argv) > 5 else '')
         elif command == 'recover':
             journal=json.loads(Path(sys.argv[2]).read_text())
             client=Client(journal['base'])
@@ -232,7 +253,7 @@ if __name__ == '__main__':
             journal['status'], journal['token'] = 'committed', ''
             save_json(sys.argv[2], journal)
         elif command == 'local-hosts':
-            local_hosts(json.loads(Path(sys.argv[2]).read_text()))
+            local_hosts(json.loads(Path(sys.argv[2]).read_text()), sys.argv[3] if len(sys.argv) > 3 else '')
         else:
             raise ValueError('Unknown API operation')
     except (ApiError, ValueError, KeyError, subprocess.TimeoutExpired, KeyboardInterrupt) as error:

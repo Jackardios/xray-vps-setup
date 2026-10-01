@@ -19,6 +19,7 @@ def yes(prompt):
 
 def configure(path, binary, previous=None):
     state = json.loads(Path(previous).read_text()) if previous else None
+    previous_egress = (state or {}).get('egress', '')
     if state:
         print('Reconfigure preserves existing keys, credentials, panel paths and install mode.')
         mode = state['mode']
@@ -43,6 +44,7 @@ def configure(path, binary, previous=None):
     if state is None:
         state = new_state(mode, main, names, binary)
     state['domain'], state['names'] = main, names
+    state['connection_name'] = ask('Connection name shown in your VPN client', state.get('connection_name', main[:64])).strip()
     state['ingress'] = state['egress'] = ''
     if mode == 'xray' and yes('Use separate ingress/egress IPv4 addresses'):
         state['ingress'], state['egress'] = ask('Ingress IPv4'), ask('Egress IPv4')
@@ -64,6 +66,8 @@ def configure(path, binary, previous=None):
         old_ssh = state.get('ssh') or {}
         state['ssh'] = {'user': user, 'port': port, 'public_key': public_key,
                         'password': (old_ssh.get('password') if old_ssh.get('user') == user else None) or secrets.token_hex(12)}
+        state['ssh_confirmed'] = False
+    if state.get('ssh') and state['egress'] != previous_egress:
         state['ssh_confirmed'] = False
     validate_state(state)
     save_json(path, state)
