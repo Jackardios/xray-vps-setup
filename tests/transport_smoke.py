@@ -4,7 +4,7 @@ Private routing exceptions exist only inside this disposable test fixture.
 import pathlib,subprocess,socket,ssl,threading,time,json,copy,tempfile,os,sys
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'lib'))
-from setup_config import new_state,server_config,render
+from setup_config import new_state,server_config,render,configure_proxy
 B=pathlib.Path(os.environ['XRAY_TEST_BINARY']).resolve()
 workspace=tempfile.TemporaryDirectory(prefix='xray-transport-test-')
 P=pathlib.Path(workspace.name); processes=[]; logs=[]
@@ -61,32 +61,58 @@ def recv(s,n):
   data+=b
  return data
 results=[]
+def fetch(port):
+ with socket.create_connection(('127.0.0.1',port),5) as s:
+  s.settimeout(5);s.sendall(b'\x05\x01\x02');assert recv(s,2)==b'\x05\x02'
+  user=b'audituser';pw=b'auditpassword';s.sendall(b'\x01'+bytes([len(user)])+user+bytes([len(pw)])+pw);assert recv(s,2)==b'\x01\x00'
+  s.sendall(b'\x05\x01\x00\x01\x7f\x00\x00\x01'+up_port.to_bytes(2,'big'));response=recv(s,10)
+  if response[1]!=0:return b''
+  s.sendall(b'GET / HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n');data=b''
+  while True:
+   b=s.recv(4096)
+   if not b:break
+   data+=b
+  return data
 try:
- for transport in ['grpc','tcp']:
+ for transport,egress in [(t,p) for t in ['grpc','tcp'] for p in ['direct','socks','http']]:
   server=json.loads((P/'xray.json').read_text());inbound=copy.deepcopy(server['inbounds'][0 if transport=='grpc' else 1]);port=freeport();inbound['port']=port;inbound['streamSettings']['realitySettings']['dest']=f'127.0.0.1:{tp}';server['inbounds']=[inbound];server['log']['loglevel']='warning'
   # Exception only for local echo fixture; production's private-IP block stays tested elsewhere.
-  server['routing']['rules'].insert(0,{'ip':['127.0.0.1'],'port':str(up_port),'outboundTag':'direct'})
-  sp=start(server,'e2e-server-'+transport);waitport(port,sp)
+  ep=None
+  if egress=='direct':
+   server['routing']['rules'].insert(0,{'ip':['127.0.0.1'],'port':str(up_port),'outboundTag':'direct'})
+  else:
+   proxy_port=freeport()
+   settings={'auth':'password','accounts':[{'user':'upstream','pass':'upstream-secret'}],'udp':False} if egress=='socks' else {'accounts':[{'user':'upstream','pass':'upstream-secret'}]}
+   ep=start({'inbounds':[{'listen':'127.0.0.1','port':proxy_port,'protocol':egress,'settings':settings}],
+             'outbounds':[{'protocol':'freedom'}]},'upstream-'+transport+'-'+egress);waitport(proxy_port,ep)
+   fixture_state=copy.deepcopy(state)
+   # Exercise hostname bootstrapping with a bound source address, without
+   # depending on the proxy to resolve its own address through built-in DoH.
+   fixture_state['egress']='127.0.0.1'
+   fixture_state['egress_proxy']={'protocol':egress,'address':'localhost','port':proxy_port,'user':'upstream','password':'upstream-secret','udp':False}
+   fixture_state['egress_proxy_previous_dns']=copy.deepcopy(server['dns'])
+   fixture_state['egress_proxy_previous_domain_strategy']=server['routing'].get('domainStrategy')
+   configure_proxy(server,fixture_state)
+   # Only this isolated fixture allows a loopback destination through its upstream.
+   server['routing']['rules']=[r for r in server['routing']['rules'] if r.get('ip')!=['geoip:private']]
+  sp=start(server,'e2e-server-'+transport+'-'+egress);waitport(port,sp)
   client=json.loads((P/'xray_full_client.json').read_text());cp=freeport();client['inbounds'][0]['port']=cp;out=client['outbounds'][0];out['settings']['vnext'][0]['address']='127.0.0.1';out['settings']['vnext'][0]['port']=port;out['streamSettings']['network']=transport
   if transport=='tcp':
    out['streamSettings'].pop('grpcSettings',None);out['settings']['vnext'][0]['users'][0]['flow']='xtls-rprx-vision'
    out['streamSettings']['realitySettings']['serverName']='vision.example.com'
   # Remove private routing on client for the isolated loopback fixture only.
   client['routing']['rules']=[]
-  cproc=start(client,'e2e-client-'+transport);waitport(cp,cproc)
-  with socket.create_connection(('127.0.0.1',cp),5) as s:
-   s.settimeout(10);s.sendall(b'\x05\x01\x02');assert recv(s,2)==b'\x05\x02'
-   user=b'audituser';pw=b'auditpassword';s.sendall(b'\x01'+bytes([len(user)])+user+bytes([len(pw)])+pw);assert recv(s,2)==b'\x01\x00'
-   s.sendall(b'\x05\x01\x00\x01\x7f\x00\x00\x01'+up_port.to_bytes(2,'big'));response=recv(s,10);assert response[1]==0,response
-   s.sendall(b'GET / HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n');data=b''
-   while True:
-    b=s.recv(4096)
-    if not b:break
-    data+=b
-   assert b'audit-tunnel-ok' in data,data
-   results.append({'transport':transport,'authenticated_tunnel':'PASS'})
+  cproc=start(client,'e2e-client-'+transport+'-'+egress);waitport(cp,cproc)
+  data=fetch(cp);assert b'audit-tunnel-ok' in data,data
+  results.append({'transport':transport,'egress':egress,'authenticated_tunnel':'PASS'})
   with socket.create_connection(('127.0.0.1',cp),5) as s:
    s.settimeout(3);s.sendall(b'\x05\x01\x00');assert recv(s,2)==b'\x05\xff';results[-1]['no_auth_rejected']='PASS'
+  if ep:
+   ep.terminate();ep.wait(timeout=5)
+   try:data=fetch(cp)
+   except (OSError,RuntimeError):data=b''
+   assert b'audit-tunnel-ok' not in data,'Proxy failure fell back to direct'
+   results[-1]['upstream_failure_no_direct_fallback']='PASS'
   cproc.terminate();sp.terminate();cproc.wait(timeout=5);sp.wait(timeout=5)
  print(json.dumps(results,indent=2));(P/'e2e-results.json').write_text(json.dumps(results,indent=2))
 finally:

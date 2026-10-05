@@ -670,6 +670,8 @@ print_result() {
 import json,pathlib,sys,urllib.parse
 sys.path.insert(0,sys.argv[4]);from setup_config import atomic_write,render
 s=json.load(open(sys.argv[1]));release=pathlib.Path(sys.argv[3]);text=['Deployment credentials (activation status is recorded in deployment.json).']
+if s.get('egress_proxy'):
+    p=s['egress_proxy'];text.append(f"VPN egress: {p['protocol']} proxy {p['address']}:{p['port']} (no direct fallback)")
 if s['mode']=='marzban':
     a=s['admin'];text += [f"Panel: https://{s['domain']}/{a['path']}/",f"User: {a['user']}",f"Password: {a['password']}"]
 elif s['mode']=='node':
@@ -767,6 +769,11 @@ PY
     check_network
     docker compose -p xray-vps-setup -f "$INSTALL_ROOT/docker-compose.yml" config --quiet
     python3 "$LIB/health.py" "$STATE_FILE" --runtime
+    if [[ "$INSTALL_MODE" != node ]]; then
+      local core_config="$OLD_CURRENT/xray/config.json"
+      [[ "$INSTALL_MODE" != marzban ]] || core_config="$OLD_CURRENT/marzban/xray_config.json"
+      python3 "$LIB/proxy_check.py" "$STATE_FILE" "$core_config"
+    fi
     log 'Existing deployment container, firewall, SSH and TLS/HTTP checks passed.'
     return
   fi
@@ -791,6 +798,7 @@ PY
   fi
   python3 "$LIB/setup_config.py" validate "$STATE_FILE"
   check_network
+  python3 "$LIB/proxy_check.py" "$STATE_FILE"
   python3 "$LIB/check_ports.py" "$STATE_FILE"
   if [[ -f "$INSTALL_ROOT/docker-compose.yml" ]]; then
     local services

@@ -19,6 +19,7 @@ import panel_api as api
 import configure
 import health
 import ssh_policy
+import proxy_check
 
 TEMPLATE=(ROOT/'templates_for_script/xray').read_text()
 BINARY=os.environ.get('XRAY_TEST_BINARY')
@@ -139,7 +140,7 @@ class ConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             previous=Path(d)/'previous.json';output=Path(d)/'state.json'
             s=state();s['connection_name']='Мой VPN';cfg.save_json(previous,s)
-            with patch('builtins.input',side_effect=['']*6):
+            with patch('builtins.input',side_effect=['']*7):
                 configure.configure(output,'/unused',previous)
             self.assertEqual(json.loads(output.read_text())['connection_name'],'Мой VPN')
 
@@ -155,7 +156,7 @@ class ConfigurationTests(unittest.TestCase):
                 s=state();s.update(egress=old,ingress='192.0.2.1' if old else '',ssh_confirmed=True,
                                   ssh={'user':'operator','port':22,'public_key':'ssh-ed25519 fixture','password':'fixture'})
                 p=Path(d);cfg.save_json(p/'old.json',s)
-                answers=['','','', 'y' if new else 'n']+(['192.0.2.1',new] if new else [])+['n','n']
+                answers=['','','', 'y' if new else 'n']+(['192.0.2.1',new] if new else [])+['n','n','n']
                 with patch('builtins.input',side_effect=answers): configure.configure(p/'new.json','/unused',p/'old.json')
                 self.assertEqual(json.loads((p/'new.json').read_text())['ssh_confirmed'],old==new)
 

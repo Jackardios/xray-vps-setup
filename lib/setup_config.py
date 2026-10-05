@@ -19,6 +19,9 @@ RESERVED_PORTS = {80, 443, 4123, 8443, 8444, 8000, 40000, 62001, 62002}
 IMAGES = {'xray': 'ghcr.io/xtls/xray-core:26.3.27',
           'angie': 'docker.angie.software/angie:1.12.2-minimal',
           'marzban': 'gozargah/marzban:v0.8.4', 'node': 'gozargah/marzban-node:v0.5.2'}
+PROXY_TAG = 'xray-setup-egress-proxy'
+PROXY_UDP_RULE = 'xray-setup-egress-udp-block'
+PROXY_BLOCK_RULE = 'xray-setup-egress-block-'
 
 
 def atomic_write(path, content, mode=0o600):
@@ -90,6 +93,35 @@ def validate_state(state):
         ssh_port(state['ssh']['port'])
         if not re.fullmatch(r'[a-z][a-z0-9_-]{0,31}', state['ssh']['user']):
             raise ValueError('Invalid SSH username')
+    proxy = state.get('egress_proxy')
+    if proxy is not None:
+        if state['mode'] == 'node':
+            raise ValueError('Node inherits the egress proxy from its panel')
+        if state.get('warp'):
+            raise ValueError('External egress proxy and WARP cannot be enabled together')
+        if not isinstance(proxy, dict) or proxy.get('protocol') not in ('socks', 'http'):
+            raise ValueError('Egress proxy must use SOCKS5 or HTTP')
+        address = proxy.get('address', '')
+        if not isinstance(address, str) or not address:
+            raise ValueError('Proxy address is required')
+        try:
+            ipaddress.ip_address(address)
+        except ValueError:
+            if domain(address) != address:
+                raise ValueError('Proxy hostname must be canonical')
+        port = proxy.get('port')
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise ValueError('Proxy port must be between 1 and 65535')
+        for key in ('user', 'password'):
+            value = proxy.get(key)
+            if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
+                raise ValueError('Invalid proxy credentials')
+            if proxy['protocol'] == 'socks' and len(value.encode()) > 255:
+                raise ValueError('SOCKS5 credentials must fit in 255 bytes')
+        if ':' in proxy['user'] or (proxy['password'] and not proxy['user']):
+            raise ValueError('Proxy username cannot contain a colon; password requires a username')
+        if type(proxy.get('udp')) is not bool or (proxy['protocol'] == 'http' and proxy['udp']):
+            raise ValueError('HTTP proxy does not support UDP')
     if state['mode'] != 'node':
         keys = state['keys']
         for name in ('private', 'public'):
@@ -257,8 +289,62 @@ def server_config(template, state, existing=None):
                 outbound['sendThrough'] = state['egress']
             else:
                 outbound.pop('sendThrough', None)
+    configure_proxy(cfg, state)
     # Existing WARP/custom routing is preserved on repair; fresh WARP changes are explicit.
     return cfg
+
+
+def configure_proxy(config, state):
+    """Reconcile only installer-owned proxy settings; retain unrelated routing."""
+    proxy = state.get('egress_proxy')
+    had_proxy = any(o.get('tag') == PROXY_TAG for o in config['outbounds'])
+    if not proxy and not had_proxy:
+        return
+    if had_proxy and any(k not in state for k in ('egress_proxy_previous_dns', 'egress_proxy_previous_domain_strategy')):
+        raise ValueError('Managed proxy has no saved DNS/routing configuration; restore its state before changing it')
+    config['outbounds'] = [o for o in config['outbounds'] if o.get('tag') != PROXY_TAG]
+    rules = [r for r in config['routing']['rules'] if r.get('outboundTag') != PROXY_TAG and
+             r.get('ruleTag') != PROXY_UDP_RULE and not r.get('ruleTag', '').startswith(PROXY_BLOCK_RULE)]
+    config['routing']['rules'] = rules
+    if not proxy:
+        config['dns'] = copy.deepcopy(state['egress_proxy_previous_dns'])
+        previous_strategy = state['egress_proxy_previous_domain_strategy']
+        if previous_strategy is None:
+            config['routing'].pop('domainStrategy', None)
+        else:
+            config['routing']['domainStrategy'] = previous_strategy
+        return
+    settings = {'servers': [{'address': proxy['address'], 'port': proxy['port']}]}
+    if proxy['user']:
+        settings['servers'][0]['users'] = [{'user': proxy['user'], 'pass': proxy['password']}]
+    outbound = {'tag': PROXY_TAG, 'protocol': proxy['protocol'], 'settings': settings}
+    if state['egress']:
+        # Bind the connection to the upstream itself. A freedom/UseIPv4 hop
+        # would resolve its hostname through DNS that already depends on it.
+        outbound['sendThrough'] = state['egress']
+    config['outbounds'].append(outbound)
+    clients = list(TAGS.values())
+    dns_tag = config.get('dns', {}).get('tag') or 'dns-aux'
+    routed = clients + [dns_tag]
+    blocked = {o['tag'] for o in config['outbounds'] if o.get('protocol') == 'blackhole'}
+    managed = []
+    # Keep existing blocking policies effective before the catch-all, without moving
+    # rules for unrelated/API inbounds or allowing custom direct/WARP rules to bypass it.
+    for index, rule in enumerate(rules):
+        if rule.get('outboundTag') in blocked:
+            tags = [t for t in routed if t in rule.get('inboundTag', routed)]
+            if tags:
+                copied = copy.deepcopy(rule)
+                copied.update(inboundTag=tags, ruleTag=PROXY_BLOCK_RULE + str(index))
+                managed.append(copied)
+    if not proxy['udp']:
+        managed.append({'type': 'field', 'ruleTag': PROXY_UDP_RULE, 'inboundTag': clients,
+                        'network': 'udp', 'outboundTag': 'block'})
+    managed.append({'type': 'field', 'inboundTag': routed, 'network': 'tcp,udp', 'outboundTag': PROXY_TAG})
+    config['routing']['rules'] = managed + rules
+    # Resolve domains for IP blocking rules before the proxy catch-all can match.
+    config['routing']['domainStrategy'] = 'IPOnDemand'
+    config['dns'] = dict(config.get('dns', {}), servers=['https://1.1.1.1/dns-query'], tag=dns_tag)
 
 
 def panel_contract(config, required):
@@ -370,7 +456,17 @@ def main():
     elif args.command == 'render-server':
         state = validate_state(json.loads(Path(args.arguments[0]).read_text()))
         existing = json.loads(Path(args.arguments[3]).read_text()) if len(args.arguments) > 3 else None
-        save_json(args.arguments[2], server_config(Path(args.arguments[1]).read_text(), state, existing))
+        template = Path(args.arguments[1]).read_text()
+        if state.get('egress_proxy') and 'egress_proxy_previous_dns' not in state:
+            if existing and any(o.get('tag') == PROXY_TAG for o in existing.get('outbounds', [])):
+                raise ValueError('Proxy tag already exists without saved DNS state; refusing to overwrite it')
+            state['egress_proxy_previous_dns'] = copy.deepcopy((existing or json.loads(template)).get('dns', {}))
+            state['egress_proxy_previous_domain_strategy'] = (existing or json.loads(template)).get('routing', {}).get('domainStrategy')
+        save_json(args.arguments[2], server_config(template, state, existing))
+        if not state.get('egress_proxy'):
+            state.pop('egress_proxy_previous_dns', None)
+            state.pop('egress_proxy_previous_domain_strategy', None)
+        save_json(args.arguments[0], state)
     elif args.command == 'export':
         state = validate_state(json.loads(Path(args.arguments[0]).read_text()))
         values = {'INSTALL_MODE': state['mode'], 'VLESS_DOMAIN': state['domain'],
