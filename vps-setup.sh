@@ -628,7 +628,7 @@ PY
   if [[ "$INSTALL_MODE" == marzban ]]; then
     local imported=n
     for ((attempt=0; attempt<12; attempt++)); do
-      if docker exec marzban marzban-cli admin import-from-env >/dev/null 2>&1; then imported=y; break; fi
+      if docker exec marzban marzban-cli admin import-from-env --yes >/dev/null 2>&1; then imported=y; break; fi
       sleep 3
     done
     [[ "$imported" == y ]] || die 'Panel administrator initialization failed'
