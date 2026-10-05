@@ -56,6 +56,8 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(rendered['routing']['domainStrategy'],'IPOnDemand')
         self.assertTrue(any(r.get('ruleTag')==cfg.PROXY_UDP_RULE for r in rules[:position]))
         self.assertTrue(any(r.get('ip')==['geoip:private'] for r in rules[:position]))
+        self.assertEqual(rules[0]['outboundTag'], cfg.PROXY_DNS_TAG)
+        self.assertEqual(rules[0]['port'], '53')
 
     def test_disable_restores_dns_and_unrelated_rules(self):
         for strategy in ['IPIfNonMatch','AsIs',None]:
@@ -211,6 +213,103 @@ class ProxyTests(unittest.TestCase):
             self.assertIn('1.1.1.1:443',received)  # Built-in DoH went through the proxy.
         finally:
             upstream.shutdown();upstream.server_close();thread.join(timeout=2)
+
+    @unittest.skipUnless(BINARY,'Set XRAY_TEST_BINARY for native checks')
+    def test_real_xray_tcp_only_proxy_blocks_udp_without_direct_fallback(self):
+        # A direct positive control proves the UDP fixture works before testing
+        # that the TCP-only proxy policy drops the same packet.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as target:
+            target.bind(('127.0.0.1', 0))
+            target.settimeout(.5)
+            destination = target.getsockname()[1]
+            for protocol in [None, 'socks', 'http']:
+                with self.subTest(protocol=protocol), tempfile.TemporaryDirectory() as directory:
+                    s = state()
+                    if protocol:
+                        s['egress_proxy'] = proxy(protocol)
+                        s['egress_proxy'].update(address='127.0.0.1', port=1)
+                    config = cfg.server_config(TEMPLATE, s)
+                    config['dns']['hosts'] = {'dns.fixture.invalid': ['203.0.113.9', '2001:db8::9']}
+                    # Loopback is only allowed for this disposable fixture.
+                    config['routing']['rules'] = [r for r in config['routing']['rules']
+                                                  if r.get('ip') != ['geoip:private']]
+                    with socket.socket() as listener:
+                        listener.bind(('127.0.0.1', 0))
+                        port = listener.getsockname()[1]
+                    config['inbounds'] = [{'tag': cfg.TAGS['grpc'], 'listen': '127.0.0.1',
+                                           'port': port, 'protocol': 'socks',
+                                           'settings': {'auth': 'noauth', 'udp': True}}]
+                    path = Path(directory) / 'config.json'
+                    cfg.save_json(path, config)
+                    with open(Path(directory) / 'xray.log', 'w') as log:
+                        process = subprocess.Popen([BINARY, 'run', '-config', str(path)], stdout=log, stderr=log)
+                        try:
+                            deadline = time.monotonic() + 5
+                            while True:
+                                self.assertIsNone(process.poll())
+                                try:
+                                    connection = socket.create_connection(('127.0.0.1', port), .2)
+                                    break
+                                except OSError:
+                                    if time.monotonic() > deadline:
+                                        self.fail('Xray listener not ready')
+                                    time.sleep(.05)
+                            with connection, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+                                connection.settimeout(2)
+                                stream = connection.makefile('rb')
+                                try:
+                                    connection.sendall(b'\x05\x01\x00')
+                                    self.assertEqual(stream.read(2), b'\x05\x00')
+                                    connection.sendall(b'\x05\x03\x00\x01' + b'\x00' * 6)
+                                    reply = stream.read(10)
+                                    self.assertEqual(reply[:4], b'\x05\x00\x00\x01')
+                                    relay = (socket.inet_ntoa(reply[4:8]), int.from_bytes(reply[8:10], 'big'))
+                                    packet = b'\x00\x00\x00\x01\x7f\x00\x00\x01' + destination.to_bytes(2, 'big') + b'udp-audit'
+                                    client.sendto(packet, relay)
+                                    if protocol:
+                                        with self.assertRaises(socket.timeout):
+                                            target.recvfrom(1024)
+                                        # A private resolver address also works: only
+                                        # DNS is intercepted; no private service is dialed.
+                                        name = b'\x03dns\x07fixture\x07invalid\x00'
+                                        dns_header = b'\x12\x34\x01\x00\x00\x01' + b'\x00' * 6
+                                        dns_destination = b'\x00\x00\x00\x01\xc0\xa8\x01\x01\x00\x35'
+                                        # Separate flow: Xray SOCKS UDP dispatch keeps
+                                        # the outbound chosen for the first destination.
+                                        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as dns_client:
+                                            dns_client.settimeout(2)
+                                            for query_type in [1, 28, 16]:
+                                                query = dns_header + name + query_type.to_bytes(2, 'big') + b'\x00\x01'
+                                                dns_client.sendto(dns_destination + query, relay)
+                                                response = dns_client.recvfrom(1024)[0][10:]
+                                                self.assertEqual(response[:2], b'\x12\x34')
+                                                self.assertEqual(response[3] & 15, 5 if query_type == 16 else 0)
+                                                if query_type == 1:
+                                                    self.assertEqual(response[6:8], b'\x00\x01')
+                                                    self.assertIn(socket.inet_aton('203.0.113.9'), response)
+                                                if query_type == 28:
+                                                    # Production intentionally uses IPv4;
+                                                    # AAAA gets a prompt empty answer, not a timeout.
+                                                    self.assertEqual(response[6:8], b'\x00\x00')
+                                        with socket.create_connection(('127.0.0.1', port), 2) as dns_tcp:
+                                            dns_tcp.settimeout(2)
+                                            with dns_tcp.makefile('rb') as reader:
+                                                dns_tcp.sendall(b'\x05\x01\x00')
+                                                self.assertEqual(reader.read(2), b'\x05\x00')
+                                                dns_tcp.sendall(b'\x05\x01\x00\x01\xc0\xa8\x01\x01\x00\x35')
+                                                self.assertEqual(reader.read(10)[:2], b'\x05\x00')
+                                                query = dns_header + name + b'\x00\x01\x00\x01'
+                                                dns_tcp.sendall(len(query).to_bytes(2, 'big') + query)
+                                                response = reader.read(int.from_bytes(reader.read(2), 'big'))
+                                                self.assertEqual(response[3] & 15, 0)
+                                                self.assertIn(socket.inet_aton('203.0.113.9'), response)
+                                    else:
+                                        self.assertEqual(target.recvfrom(1024)[0], b'udp-audit')
+                                finally:
+                                    stream.close()
+                        finally:
+                            process.terminate()
+                            process.wait(timeout=5)
 
     @unittest.skipUnless(BINARY,'Set XRAY_TEST_BINARY for native checks')
     def test_real_xray_accepts_authenticated_socks_and_http(self):

@@ -21,6 +21,7 @@ IMAGES = {'xray': 'ghcr.io/xtls/xray-core:26.3.27',
           'marzban': 'gozargah/marzban:v0.8.4', 'node': 'gozargah/marzban-node:v0.5.2'}
 PROXY_TAG = 'xray-setup-egress-proxy'
 PROXY_UDP_RULE = 'xray-setup-egress-udp-block'
+PROXY_DNS_TAG = 'xray-setup-egress-dns'
 PROXY_BLOCK_RULE = 'xray-setup-egress-block-'
 
 
@@ -302,8 +303,9 @@ def configure_proxy(config, state):
         return
     if had_proxy and any(k not in state for k in ('egress_proxy_previous_dns', 'egress_proxy_previous_domain_strategy')):
         raise ValueError('Managed proxy has no saved DNS/routing configuration; restore its state before changing it')
-    config['outbounds'] = [o for o in config['outbounds'] if o.get('tag') != PROXY_TAG]
-    rules = [r for r in config['routing']['rules'] if r.get('outboundTag') != PROXY_TAG and
+    owned_tags = {PROXY_TAG, PROXY_DNS_TAG}
+    config['outbounds'] = [o for o in config['outbounds'] if o.get('tag') not in owned_tags]
+    rules = [r for r in config['routing']['rules'] if r.get('outboundTag') not in owned_tags and
              r.get('ruleTag') != PROXY_UDP_RULE and not r.get('ruleTag', '').startswith(PROXY_BLOCK_RULE)]
     config['routing']['rules'] = rules
     if not proxy:
@@ -328,6 +330,14 @@ def configure_proxy(config, state):
     routed = clients + [dns_tag]
     blocked = {o['tag'] for o in config['outbounds'] if o.get('protocol') == 'blackhole'}
     managed = []
+    if not proxy['udp']:
+        # Client DNS over UDP must be answered locally through the built-in DoH
+        # resolver, before the general UDP/private-IP blocks. Reject unsupported
+        # record types explicitly rather than forwarding them outside the proxy.
+        config['outbounds'].append({'tag': PROXY_DNS_TAG, 'protocol': 'dns',
+                                    'settings': {'nonIPQuery': 'reject'}})
+        managed.append({'type': 'field', 'inboundTag': clients, 'network': 'tcp,udp',
+                        'port': '53', 'outboundTag': PROXY_DNS_TAG})
     # Keep existing blocking policies effective before the catch-all, without moving
     # rules for unrelated/API inbounds or allowing custom direct/WARP rules to bypass it.
     for index, rule in enumerate(rules):

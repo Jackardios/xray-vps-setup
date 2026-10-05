@@ -61,6 +61,18 @@ def recv(s,n):
   data+=b
  return data
 results=[]
+def fetch_dns(port):
+ with socket.create_connection(('127.0.0.1',port),5) as control,socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as client:
+  control.settimeout(5);client.settimeout(5)
+  control.sendall(b'\x05\x01\x02');assert recv(control,2)==b'\x05\x02'
+  user=b'audituser';pw=b'auditpassword';control.sendall(b'\x01'+bytes([len(user)])+user+bytes([len(pw)])+pw);assert recv(control,2)==b'\x01\x00'
+  control.sendall(b'\x05\x03\x00\x01'+b'\x00'*6);reply=recv(control,10);assert reply[:4]==b'\x05\x00\x00\x01'
+  relay=(socket.inet_ntoa(reply[4:8]),int.from_bytes(reply[8:10],'big'))
+  query=b'\x12\x34\x01\x00\x00\x01'+b'\x00'*6+b'\x03dns\x07fixture\x07invalid\x00\x00\x01\x00\x01'
+  client.sendto(b'\x00\x00\x00\x01\x01\x01\x01\x01\x00\x35'+query,relay)
+  response=client.recvfrom(1024)[0][10:]
+  assert response[:2]==b'\x12\x34' and response[3]&15==0,response
+  assert socket.inet_aton('203.0.113.9') in response,response
 def fetch(port):
  with socket.create_connection(('127.0.0.1',port),5) as s:
   s.settimeout(5);s.sendall(b'\x05\x01\x02');assert recv(s,2)==b'\x05\x02'
@@ -93,6 +105,7 @@ try:
    fixture_state['egress_proxy_previous_dns']=copy.deepcopy(server['dns'])
    fixture_state['egress_proxy_previous_domain_strategy']=server['routing'].get('domainStrategy')
    configure_proxy(server,fixture_state)
+   server['dns']['hosts']={'dns.fixture.invalid':'203.0.113.9'}
    # Only this isolated fixture allows a loopback destination through its upstream.
    server['routing']['rules']=[r for r in server['routing']['rules'] if r.get('ip')!=['geoip:private']]
   sp=start(server,'e2e-server-'+transport+'-'+egress);waitport(port,sp)
@@ -102,12 +115,14 @@ try:
    out['streamSettings']['realitySettings']['serverName']='vision.example.com'
   # Remove private routing on client for the isolated loopback fixture only.
   client['routing']['rules']=[]
+  client['inbounds'][0]['settings']['udp']=True
   cproc=start(client,'e2e-client-'+transport+'-'+egress);waitport(cp,cproc)
   data=fetch(cp);assert b'audit-tunnel-ok' in data,data
   results.append({'transport':transport,'egress':egress,'authenticated_tunnel':'PASS'})
   with socket.create_connection(('127.0.0.1',cp),5) as s:
    s.settimeout(3);s.sendall(b'\x05\x01\x00');assert recv(s,2)==b'\x05\xff';results[-1]['no_auth_rejected']='PASS'
   if ep:
+   fetch_dns(cp);results[-1]['client_udp_dns_with_tcp_only_proxy']='PASS'
    ep.terminate();ep.wait(timeout=5)
    try:data=fetch(cp)
    except (OSError,RuntimeError):data=b''
